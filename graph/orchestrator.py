@@ -15,20 +15,13 @@ _RESEARCH_KEYWORDS = [
 
 
 def route_from_coordinator(state: AgentState) -> str:
-    """Coordinator 条件路由：优先根据 coordinator 输出的路由标记判断。"""
-    last_msg = state["messages"][-1].content
-    lower = last_msg.lower()
+    """Coordinator 条件路由。
 
-    # 优先检查 coordinator 明确输出的路由标记
-    if "[route: researcher]" in lower:
-        return "researcher"
-    if "[route: responder]" in lower:
-        return "responder"
-
-    # 回退：关键词匹配（兼容旧行为）
-    if any(kw in lower for kw in _RESEARCH_KEYWORDS):
-        return "researcher"
-    return "responder"
+    所有模式都路由到 Researcher，由 Researcher 内部根据 mode 决定启用哪些搜索子 Agent。
+    Coordinator 的分析结果仍作为上下文传给 Researcher。
+    """
+    # 总是路由到 Researcher，确保搜索子 Agent 被执行
+    return "researcher"
 
 
 def create_multi_agent_graph(
@@ -121,20 +114,15 @@ def create_coordination_graph(coordinator_agent, researcher_agent, responder_age
 
 
 def create_fast_graph(coordinator_agent, researcher_agent, responder_agent):
-    """快速/计划模式：Coordinator → Researcher(2搜索) → Responder
+    """快速/计划模式：跳过 Coordinator，直接 Researcher(2搜索) → Responder
 
+    比协调模式少一次 Coordinator LLM 调用，更快。
     Researcher 下并行 2 个搜索子 Agent（联网 + 记忆）。
     """
     workflow = StateGraph(AgentState)
-    workflow.add_node("coordinator", coordinator_agent)
     workflow.add_node("researcher", researcher_agent)
     workflow.add_node("responder", responder_agent)
-    workflow.set_entry_point("coordinator")
-    workflow.add_conditional_edges(
-        "coordinator",
-        route_from_coordinator,
-        {"researcher": "researcher", "responder": "responder"}
-    )
+    workflow.set_entry_point("researcher")
     workflow.add_edge("researcher", "responder")
     workflow.add_edge("responder", END)
     return workflow.compile()

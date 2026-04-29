@@ -1439,8 +1439,11 @@ def _emit_agent_reset(fast_mode: bool, sid: str = ""):
     """发送 Agent 空闲状态到前端"""
     try:
         if fast_mode:
+            # 快速/计划模式：Researcher → Responder
+            socketio.emit("agent_finish", {"agent": "researcher", "message": "空闲"}, room=sid)
             socketio.emit("agent_finish", {"agent": "responder", "message": "空闲"}, room=sid)
         else:
+            # 协调模式：Coordinator → Researcher → Responder
             socketio.emit("agent_finish", {"agent": "coordinator", "message": "空闲"}, room=sid)
             socketio.emit("agent_finish", {"agent": "researcher", "message": "空闲"}, room=sid)
             socketio.emit("agent_finish", {"agent": "responder", "message": "空闲"}, room=sid)
@@ -1623,7 +1626,9 @@ async def _async_handle_message(sid: str, user_message: str, document_context: s
                 if node_name == "coordinator":
                     _safe_emit("agent_start", {"agent": "coordinator", "message": "分析需求中..."})
                 elif node_name == "researcher":
-                    _safe_emit("agent_finish", {"agent": "coordinator", "message": "分析完成"})
+                    # 协调模式才有 coordinator，快速/计划模式跳过
+                    if "coordinator" in event:
+                        _safe_emit("agent_finish", {"agent": "coordinator", "message": "分析完成"})
                     _safe_emit("agent_start", {"agent": "researcher", "message": "调研中..."})
                 elif node_name == "responder":
                     if "researcher" in event:
@@ -2369,7 +2374,13 @@ async def _async_execute_plan_step(sid: str, step_index: int, expected_session_i
     initial_state = {
         "messages": messages_for_llm,
         "active_agent": None,
-        "task_context": {"user_input": step_prompt, "step_index": step_index},
+        "task_context": {
+            "user_input": step_prompt,
+            "step_index": step_index,
+            "detected_language": state.detected_language,
+            "user_id": state.user_id,
+            "mode": "planning",
+        },
         "human_input_required": False,
         "base_model_response": None,
         "review_result": None,
