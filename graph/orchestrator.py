@@ -152,7 +152,7 @@ def create_fast_graph(web_searcher, memory_searcher, responder_agent):
     workflow.add_node("memory_searcher", memory_searcher_node)
     workflow.add_node("responder", responder_agent)
 
-    workflow.set_entry_point("__start__")
+    # __start__ 是 LangGraph 隐式起点，从这里并行分发给两个搜索节点
     workflow.add_conditional_edges(
         "__start__",
         start_parallel_search,
