@@ -116,6 +116,11 @@ class FrequencyRouter:
         hot_results: list[RetrievedMemory] = []
         cold_results: list[RetrievedMemory] = []
 
+        # 冷层检索超时（秒）：防止记忆过多时冷层检索卡死主响应
+        _COLD_RETRIEVE_TIMEOUT = 1.5
+        # 冷层最大返回数：减少数据量，降低解压/传输开销
+        _COLD_MAX_RESULTS = 3
+
         if strategy == RoutingStrategy.HOT_ONLY:
             hot_results = await self.hot_tier.retrieve(
                 query_embedding=query_embedding,
@@ -123,11 +128,18 @@ class FrequencyRouter:
                 filters=filters,
             )
         elif strategy == RoutingStrategy.COLD_ONLY:
-            cold_results = await self.cold_tier.retrieve(
-                query_embedding=query_embedding,
-                top_k=top_k,
-                filters=filters,
-            )
+            try:
+                cold_results = await asyncio.wait_for(
+                    self.cold_tier.retrieve(
+                        query_embedding=query_embedding,
+                        top_k=min(top_k, _COLD_MAX_RESULTS),
+                        filters=filters,
+                    ),
+                    timeout=_COLD_RETRIEVE_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("cold_tier_retrieve_timeout", query=query_text[:50])
+                cold_results = []
         elif strategy == RoutingStrategy.HOT_FIRST:
             # Try hot tier first, fall back to cold if insufficient
             hot_results = await self.hot_tier.retrieve(
@@ -136,24 +148,40 @@ class FrequencyRouter:
                 filters=filters,
             )
             if len(hot_results) < top_k // 2:
-                cold_results = await self.cold_tier.retrieve(
-                    query_embedding=query_embedding,
-                    top_k=top_k - len(hot_results),
-                    filters=filters,
-                )
+                try:
+                    cold_results = await asyncio.wait_for(
+                        self.cold_tier.retrieve(
+                            query_embedding=query_embedding,
+                            top_k=min(top_k - len(hot_results), _COLD_MAX_RESULTS),
+                            filters=filters,
+                        ),
+                        timeout=_COLD_RETRIEVE_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("cold_tier_retrieve_timeout", query=query_text[:50])
+                    cold_results = []
         elif strategy == RoutingStrategy.BOTH:
-            # Query both tiers in parallel
+            # Query both tiers in parallel; cold tier has timeout
             hot_task = self.hot_tier.retrieve(
                 query_embedding=query_embedding,
                 top_k=top_k,
                 filters=filters,
             )
-            cold_task = self.cold_tier.retrieve(
-                query_embedding=query_embedding,
-                top_k=top_k,
-                filters=filters,
+            cold_task = asyncio.wait_for(
+                self.cold_tier.retrieve(
+                    query_embedding=query_embedding,
+                    top_k=min(top_k, _COLD_MAX_RESULTS),
+                    filters=filters,
+                ),
+                timeout=_COLD_RETRIEVE_TIMEOUT,
             )
-            hot_results, cold_results = await asyncio.gather(hot_task, cold_task)
+            try:
+                hot_results, cold_results = await asyncio.gather(hot_task, cold_task)
+            except asyncio.TimeoutError:
+                # Cold tier timed out, use hot results only
+                hot_results = await hot_task
+                cold_results = []
+                logger.warning("cold_tier_retrieve_timeout", query=query_text[:50])
 
         # Merge and re-rank
         merged = self.ranker.merge_and_rank(

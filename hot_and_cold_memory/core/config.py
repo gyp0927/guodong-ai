@@ -93,10 +93,11 @@ class Settings(BaseSettings):
     DOCUMENT_STORE_PATH: str = "./data/memories"
 
     # Tier Configuration
+    # 阈值调优：降低热层门槛，让更多查询走热层（快），减少冷层查询（慢）
     COLD_TIER_COMPRESSION_RATIO: float = 0.2
-    HOT_TO_COLD_THRESHOLD: float = 0.25
-    COLD_TO_HOT_THRESHOLD: float = 0.7
-    HOT_ACCESS_COUNT_THRESHOLD: int = 50
+    HOT_TO_COLD_THRESHOLD: float = 0.35    # 提高：低于0.35才走冷层（原为0.25）
+    COLD_TO_HOT_THRESHOLD: float = 0.55    # 降低：高于0.55就走热层（原为0.7）
+    HOT_ACCESS_COUNT_THRESHOLD: int = 20   # 降低：访问20次就进热层（原为50）
 
     # Frequency Tracking
     DECAY_HALF_LIFE_HOURS: float = 72.0

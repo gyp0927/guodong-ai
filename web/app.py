@@ -1553,10 +1553,16 @@ async def _async_handle_message(sid: str, user_message: str, document_context: s
     if _MEMORY_SYSTEM_AVAILABLE:
         try:
             store = get_memory_store()
-            memories = await store.retrieve(user_message, top_k=5, user_id=state.user_id)
+            # 记忆检索加 2 秒超时：防止记忆系统卡死主响应流程
+            memories = await asyncio.wait_for(
+                store.retrieve(user_message, top_k=5, user_id=state.user_id),
+                timeout=2.0,
+            )
             if memories:
                 memory_context = store.format_memories_for_prompt(memories)
                 logger.info(f"Retrieved {len(memories)} memories for sid={sid}")
+        except asyncio.TimeoutError:
+            logger.warning(f"Memory retrieval timeout for sid={sid}, skipping")
         except Exception as e:
             logger.warning(f"Memory retrieval failed: {e}")
 
