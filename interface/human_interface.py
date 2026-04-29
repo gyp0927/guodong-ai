@@ -1,4 +1,5 @@
 import logging
+import re
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langgraph.graph.state import CompiledStateGraph
 
@@ -7,6 +8,29 @@ from state.manager import SessionManager
 from core.model_router import get_router
 
 logger = logging.getLogger(__name__)
+
+
+# 简单语言检测（复用 web/app.py 的逻辑，避免循环导入）
+def _detect_language(text: str) -> str:
+    if not text or not text.strip():
+        return "zh"
+    cleaned = re.sub(r"[\s\.\,\!\?\;\:\'\"\(\)\[\]\{\}\\/\-\_\@\#\$\%\&\*\+\=\|\<\>\`\~]", "", text)
+    if not cleaned:
+        return "zh"
+    zh_chars = len(re.findall(r"[一-鿿]", cleaned))
+    ja_chars = len(re.findall(r"[぀-ゟ゠-ヿ]", cleaned))
+    ko_chars = len(re.findall(r"[가-힯]", cleaned))
+    total = len(cleaned)
+    if total == 0:
+        return "zh"
+    scores = {"zh": zh_chars / total, "ja": ja_chars / total, "ko": ko_chars / total}
+    best_lang = max(scores, key=scores.get)
+    if scores[best_lang] > 0.25:
+        return best_lang
+    ascii_chars = sum(1 for c in cleaned if ord(c) < 128)
+    if ascii_chars / total > 0.6:
+        return "en"
+    return "zh"
 
 
 class HumanInterface:
@@ -27,6 +51,7 @@ class HumanInterface:
         self.fast_mode = fast_mode
         self.review = review
         self.review_language = review_language
+        self.detected_language: str | None = None  # 自动检测的用户语言
 
         if fast_mode or coordinator is None:
             self.graph = create_fast_graph(responder)
@@ -45,12 +70,17 @@ class HumanInterface:
         route_result = router.route(content, history_turns)
         logger.info(f"Model routing: tier={route_result['tier']}, score={route_result['analysis']['score']}")
 
+        # 自动语言检测（仅第一条用户消息）
+        if self.detected_language is None:
+            self.detected_language = _detect_language(content)
+            logger.info(f"Auto-detected language: {self.detected_language}")
+
         self.messages.add_human_message(content)
 
         initial_state = {
             "messages": self.messages.get_messages_for_model(max_turns=10),
             "active_agent": None,
-            "task_context": {"user_input": content},
+            "task_context": {"user_input": content, "detected_language": self.detected_language},
             "human_input_required": False,
             "base_model_response": None,
             "review_result": None,

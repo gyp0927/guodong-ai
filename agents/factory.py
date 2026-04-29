@@ -205,13 +205,29 @@ async def researcher_node(state: dict, sid: str | None = None) -> dict:
 async def responder_node(state: dict, sid: str | None = None) -> dict:
     """响应者Agent - 生成最终回答"""
     plugin_prompt = get_plugins_prompt()
+
+    # 读取自动检测到的用户语言（从 task_context 中获取）
+    detected_lang = state.get("task_context", {}).get("detected_language", "zh")
+    lang_instructions = {
+        "zh": "\n\n重要：你必须用中文回答。",
+        "en": "\n\nIMPORTANT: You must respond entirely in English.",
+        "ja": "\n\n重要：あなたは日本語で回答しなければなりません。",
+        "ko": "\n\n중요: 한국어로 답변해야 합니다.",
+        "fr": "\n\nIMPORTANT: Vous devez répondre entièrement en français.",
+        "de": "\n\nWICHTIG: Sie müssen vollständig auf Deutsch antworten.",
+        "es": "\n\nIMPORTANTE: Debe responder completamente en español.",
+        "ru": "\n\nВАЖНО: Вы должны отвечать полностью на русском языке.",
+        "ar": "\n\nمهم: يجب أن ترد باللغة العربية بالكامل.",
+    }
+    lang_instr = lang_instructions.get(detected_lang, "")
+
     responder_prompt = f"""你是 ResponderBot（果冻ai），一位乐于助人且友善的助手。
 
 你的职责是：
 1. 提供清晰、友好的回复
 2. 以易于理解的方式呈现信息
 3. 保持对话式、亲切的风格
-{plugin_prompt}
+{plugin_prompt}{lang_instr}
 
 重要：每次回答时，你必须以"我是果冻ai"开头，然后再根据上下文生成最终回答。"""
     return await _run_agent(state, responder_prompt, "responder", sid)

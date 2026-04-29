@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -258,6 +259,78 @@ def restrict_local_only():
                 return "Access denied: configuration is local only", 403
 
 
+# ===== 语言检测 =====
+
+def detect_language(text: str) -> str:
+    """检测文本的主要语言。返回 'zh', 'en', 'ja', 'ko' 等 ISO 代码。
+
+    基于字符集统计，无需额外依赖：
+    - 中日韩统一表意文字 (CJK) → zh
+    - 平假名/片假名 → ja
+    - 韩文音节 → ko
+    - 主要是 ASCII → en
+    - 否则默认 zh
+    """
+    if not text or not text.strip():
+        return "zh"
+
+    cleaned = re.sub(r"[\s\.\,\!\?\;\:\'\"\(\)\[\]\{\}\\/\-\_\@\#\$\%\&\*\+\=\|\<\>\`\~]", "", text)
+    if not cleaned:
+        return "zh"
+
+    zh_chars = len(re.findall(r"[一-鿿]", cleaned))
+    ja_chars = len(re.findall(r"[぀-ゟ゠-ヿ]", cleaned))
+    ko_chars = len(re.findall(r"[가-힯]", cleaned))
+    total = len(cleaned)
+
+    if total == 0:
+        return "zh"
+
+    scores = {
+        "zh": zh_chars / total,
+        "ja": ja_chars / total,
+        "ko": ko_chars / total,
+    }
+    best_lang = max(scores, key=scores.get)
+    if scores[best_lang] > 0.25:
+        return best_lang
+
+    ascii_chars = sum(1 for c in cleaned if ord(c) < 128)
+    if ascii_chars / total > 0.6:
+        return "en"
+
+    return "zh"
+
+
+_LANG_NAMES = {
+    "zh": "中文",
+    "en": "English",
+    "ja": "日本語",
+    "ko": "한국어",
+    "fr": "Français",
+    "de": "Deutsch",
+    "es": "Español",
+    "ru": "Русский",
+    "ar": "العربية",
+}
+
+
+def _lang_instruction(lang: str) -> str:
+    """根据语言代码生成 responder prompt 中的语言指令。"""
+    instructions = {
+        "zh": "\n\n重要：你必须用中文回答。",
+        "en": "\n\nIMPORTANT: You must respond entirely in English.",
+        "ja": "\n\n重要：あなたは日本語で回答しなければなりません。",
+        "ko": "\n\n중요: 한국어로 답변해야 합니다.",
+        "fr": "\n\nIMPORTANT: Vous devez répondre entièrement en français.",
+        "de": "\n\nWICHTIG: Sie müssen vollständig auf Deutsch antworten.",
+        "es": "\n\nIMPORTANTE: Debe responder completamente en español.",
+        "ru": "\n\nВАЖНО: Вы должны отвечать полностью на русском языке.",
+        "ar": "\n\nمهم: يجب أن ترد باللغة العربية بالكامل.",
+    }
+    return instructions.get(lang, instructions.get("en", ""))
+
+
 # ===== Socket 状态隔离 =====
 
 class SocketState:
@@ -273,6 +346,7 @@ class SocketState:
         self.current_base_response: str | None = None
         self.fast_mode = True
         self.review_language = "zh"
+        self.detected_language: str | None = None  # 自动检测的用户语言（仅第一条消息）
         # 计划模式状态
         self.planning_mode = False
         self.current_plan: dict | None = None  # { title, steps[] }
@@ -1486,6 +1560,14 @@ async def _async_handle_message(sid: str, user_message: str, document_context: s
         except Exception as e:
             logger.warning(f"Memory retrieval failed: {e}")
 
+    # === 自动语言检测（仅第一条用户消息） ===
+    # 如果当前会话还没有检测过语言，且这是第一条用户消息，进行检测
+    human_msgs = [m for m in messages if getattr(m, "type", None) == "human"]
+    if state.detected_language is None:
+        state.detected_language = detect_language(user_message)
+        lang_name = _LANG_NAMES.get(state.detected_language, state.detected_language)
+        logger.info(f"Auto-detected language for sid={sid}: {state.detected_language} ({lang_name})")
+
     # 传给 LLM 的消息列表（历史 + 当前）
     # 如果有相关记忆，以 SystemMessage 形式注入到消息列表开头
     messages_for_llm = messages + [current_msg]
@@ -1497,7 +1579,7 @@ async def _async_handle_message(sid: str, user_message: str, document_context: s
     initial_state = {
         "messages": messages_for_llm,
         "active_agent": None,
-        "task_context": {"user_input": user_message},
+        "task_context": {"user_input": user_message, "detected_language": state.detected_language},
         "human_input_required": False,
         "base_model_response": None,
         "review_result": None,
@@ -1575,7 +1657,8 @@ async def _async_handle_message(sid: str, user_message: str, document_context: s
             # 快速模式：直接调用 LLM，绕过 LangGraph 状态管理开销
             llm = get_llm(sid)
             from langchain_core.messages import AIMessage, SystemMessage
-            responder_prompt = """你是 ResponderBot（果冻ai），一位乐于助人且友善的助手。\n\n你的职责是：\n1. 提供清晰、友好的回复\n2. 以易于理解的方式呈现信息\n3. 保持对话式、亲切的风格\n\n重要：每次回答时，你必须以"我是果冻ai"开头，然后再根据上下文生成最终回答。"""
+            lang_instr = _lang_instruction(state.detected_language or "zh")
+            responder_prompt = f"""你是 ResponderBot（果冻ai），一位乐于助人且友善的助手。\n\n你的职责是：\n1. 提供清晰、友好的回复\n2. 以易于理解的方式呈现信息\n3. 保持对话式、亲切的风格\n{lang_instr}\n\n重要：每次回答时，你必须以"我是果冻ai"开头，然后再根据上下文生成最终回答。"""
             all_messages = [SystemMessage(content=responder_prompt)] + messages_for_llm
             response = ""
             async for chunk in llm.astream(all_messages):
