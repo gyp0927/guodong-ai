@@ -620,7 +620,7 @@ html, body {
 }
 
 .message.user .message-avatar {
-  background: #10a37f;
+  background: linear-gradient(135deg, #0d9488 0%, #10b981 100%);
   color: white;
 }
 
