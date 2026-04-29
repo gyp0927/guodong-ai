@@ -38,8 +38,8 @@
 ### 安装
 
 ```bash
-git clone https://github.com/your-username/jelly-ai.git
-cd jelly-ai
+git clone https://github.com/gyp0927/guodong-ai.git
+cd guodong-ai
 pip install -r requirements.txt
 ```
 
