@@ -1364,7 +1364,8 @@ def handle_message(data):
 
     user_message = data.get("message", "")
     document_context = data.get("document_context", "")
-    web_search = data.get("web_search", False)
+    # 联网搜索默认启用（前端已删除开关，所有模式默认使用联网）
+    web_search = data.get("web_search", True)
     if not user_message:
         emit("error", {"message": "Empty message"})
         return

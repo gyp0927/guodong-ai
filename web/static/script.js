@@ -23,7 +23,6 @@ const modelSwitcherList = document.getElementById("modelSwitcherList");
 const reviewBar = document.getElementById("reviewBar");
 const reviewBarBtn = document.getElementById("reviewBarBtn");
 const stopBtn = document.getElementById("stopBtn");
-const webSearchBtn = document.getElementById("webSearchBtn");
 const uploadBtn = document.getElementById("uploadBtn");
 const fileInput = document.getElementById("fileInput");
 const fileAttachment = document.getElementById("fileAttachment");
@@ -44,7 +43,6 @@ let currentMode = "coordination"; // "coordination" | "fast" | "planning"
 let fastMode = false;
 let planningMode = false;
 let currentPlan = null;  // { title, steps[] }
-let webSearchEnabled = false;
 let attachedFile = null; // { filename, content }
 let userConfig = null;   // { provider, model, apiKey, name } LAN 用户的本地配置
 
@@ -499,14 +497,6 @@ if (inputModeBtn) {
       currentMode = "coordination";
       socket.emit("set_mode", { mode: "coordination" });
     }
-  });
-}
-
-if (webSearchBtn) {
-  webSearchBtn.addEventListener("click", () => {
-    webSearchEnabled = !webSearchEnabled;
-    webSearchBtn.classList.toggle("active", webSearchEnabled);
-    showToast(webSearchEnabled ? "联网搜索已开启" : "联网搜索已关闭");
   });
 }
 
@@ -1150,7 +1140,7 @@ function sendMessage() {
   chatInput.value = "";
   chatInput.style.height = "auto";
 
-  const payload = { message, web_search: webSearchEnabled };
+  const payload = { message };
   if (attachedFile) {
     payload.document_context = attachedFile.content;
     hideFileAttachment();
