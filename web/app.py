@@ -1459,11 +1459,20 @@ def _record_api_stats(sid: str, messages_for_llm: list, final_state: dict | None
         duration_ms = int((time.time() - call_start) * 1000)
         provider = get_provider()
         model = get_model_name()
-        # 估算 token 数（粗略：1 token ≈ 3 字符）
-        all_content = "\n".join(m.content for m in messages_for_llm if hasattr(m, "content"))
-        prompt_tokens = len(all_content) // 3
-        resp_content = final_state["messages"][-1].content if final_state else ""
-        completion_tokens = len(resp_content) // 3
+        # 估算 token 数：优先使用 tiktoken，回退到字符数估算
+        try:
+            import tiktoken
+            enc = tiktoken.get_encoding("cl100k_base")
+            all_content = "\n".join(m.content for m in messages_for_llm if hasattr(m, "content"))
+            prompt_tokens = len(enc.encode(all_content))
+            resp_content = final_state["messages"][-1].content if final_state else ""
+            completion_tokens = len(enc.encode(resp_content))
+        except Exception:
+            # 回退：粗略估算（1 token ≈ 3 字符）
+            all_content = "\n".join(m.content for m in messages_for_llm if hasattr(m, "content"))
+            prompt_tokens = len(all_content) // 3
+            resp_content = final_state["messages"][-1].content if final_state else ""
+            completion_tokens = len(resp_content) // 3
         status = "stopped" if is_stopped(sid) else "success"
         record = CallRecord(
             timestamp=time.time(),

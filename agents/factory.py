@@ -234,7 +234,8 @@ async def web_searcher_agent(query: str) -> str:
     """联网搜索子 Agent - 执行 DuckDuckGo 搜索并总结结果。"""
     try:
         from tools.search import search_and_summarize
-        result = search_and_summarize(query, max_results=3)
+        # search_and_summarize 是同步函数，使用 asyncio.to_thread 避免阻塞事件循环
+        result = await asyncio.to_thread(search_and_summarize, query, max_results=3)
         if result and "未找到" not in result:
             return f"[联网搜索结果]\n\n{result}"
     except ImportError:
@@ -271,7 +272,8 @@ async def knowledge_searcher_agent(query: str) -> str:
     """知识库搜索子 Agent - 从 RAG 向量库检索相关文档。"""
     try:
         from core.rag import search_knowledge
-        result = search_knowledge(query, top_k=3)
+        # search_knowledge 是同步函数，使用 asyncio.to_thread 避免阻塞事件循环
+        result = await asyncio.to_thread(search_knowledge, query, top_k=3)
         if result and "知识库为空" not in result and "未启用" not in result:
             return f"[知识库检索结果]\n\n{result}"
     except ImportError:

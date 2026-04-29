@@ -64,9 +64,13 @@ def init_db():
 class ResponseCache:
     """LLM 响应缓存管理器"""
 
+    # 每多少次 get 才执行一次过期清理，减少写操作
+    _CLEANUP_INTERVAL = 50
+
     def __init__(self, ttl_seconds: int = _DEFAULT_TTL, enabled: bool = True):
         self.ttl = ttl_seconds
         self.enabled = enabled
+        self._get_count = 0
         init_db()
 
     def _get_cache_key(self, messages: list, provider: str, model: str) -> str:
@@ -108,8 +112,11 @@ class ResponseCache:
         with _lock:
             conn = _get_conn()
             try:
-                # 清理过期条目
-                conn.execute("DELETE FROM cache_entries WHERE expires_at < ?", (time.time(),))
+                # 周期性清理过期条目（每 CLEANUP_INTERVAL 次 get 执行一次），
+                # 避免每次读取都触发写操作，提升并发性能
+                self._get_count += 1
+                if self._get_count % self._CLEANUP_INTERVAL == 0:
+                    conn.execute("DELETE FROM cache_entries WHERE expires_at < ?", (time.time(),))
 
                 cursor = conn.execute(
                     """SELECT response, hit_count FROM cache_entries
