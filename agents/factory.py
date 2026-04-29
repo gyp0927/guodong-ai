@@ -14,6 +14,30 @@ from prompts.coordinator_prompt import COORDINATOR_PROMPT
 from prompts.reviewer_prompt import get_reviewer_prompt
 from state.stop_flag import is_stopped
 
+# 全局共享的异步 HTTP 客户端（连接池复用）
+_httpx_client = None
+
+
+def _get_http_client():
+    """获取全局共享的 httpx.AsyncClient，启用连接池复用。"""
+    global _httpx_client
+    if _httpx_client is None:
+        try:
+            import httpx
+            _httpx_client = httpx.AsyncClient(
+                limits=httpx.Limits(
+                    max_connections=100,
+                    max_keepalive_connections=20,
+                    keepalive_expiry=30.0,
+                ),
+                timeout=httpx.Timeout(60.0, connect=5.0),
+            )
+            logger.info("HTTP client pool initialized (keepalive=30s, max=100)")
+        except ImportError:
+            logger.warning("httpx not installed, falling back to default HTTP client")
+            return None
+    return _httpx_client
+
 logger = logging.getLogger(__name__)
 
 # 按 sid 隔离的 LLM 配置和流式回调
@@ -107,6 +131,10 @@ def get_llm(sid: str = "") -> ChatOpenAI:
             return _llm_cache[cache_key]
 
         logger.debug(f"Creating new LLM instance for model={kwargs.get('model')}")
+        # 启用 HTTP 连接池复用，减少每次请求建立 TCP 连接的开销
+        http_client = _get_http_client()
+        if http_client:
+            kwargs["http_client"] = http_client
         instance = ChatOpenAI(**kwargs)
         _llm_cache[cache_key] = instance
         return instance
@@ -140,28 +168,35 @@ async def _run_agent(
 
     logger.debug(f"[{agent_name}] Starting generation, messages_count={len(messages)}")
 
-    # 仅对 responder 节点启用缓存（最终输出）
-    is_responder = agent_name == "responder"
-    cache = get_cache() if is_responder else None
-    if cache and is_responder:
+    # 对 responder 和 coordinator 节点启用缓存
+    # - responder: 缓存最终输出，避免重复生成相同回答
+    # - coordinator: 缓存路由决策，相同问题直接走缓存路径
+    cache_enabled = agent_name in ("responder", "coordinator")
+    cache = get_cache() if cache_enabled else None
+    if cache and cache_enabled:
         try:
             _provider = get_provider()
             _model = get_model_name()
             cached_response = cache.get(messages, _provider, _model)
             if cached_response is not None:
                 logger.info(f"[{agent_name}] Cache hit, skipping generation")
+                # coordinator 不需要流式输出，直接返回
+                if agent_name == "coordinator":
+                    return {"messages": [AIMessage(content=cached_response, name=agent_name)]}
                 stream_cb = on_token if on_token else get_streaming_callback(sid)
                 if stream_cb:
-                    # 模拟流式输出缓存内容
-                    stream_cb(cached_response)
+                    # 模拟流式输出缓存内容（分块发送，避免前端卡顿）
+                    chunk_size = 20
+                    for i in range(0, len(cached_response), chunk_size):
+                        stream_cb(cached_response[i:i+chunk_size])
                 return {"messages": [AIMessage(content=cached_response, name=agent_name)]}
         except (OSError, ValueError) as e:
             logger.warning(f"Cache lookup failed: {e}, falling back to generation")
 
     response = ""
     # 只有 responder 节点触发流式回调（最终输出）
-    # 优先使用显式传入的 on_token，否则按 sid 查找全局回调
-    stream_cb = on_token if on_token else (get_streaming_callback(sid) if is_responder else None)
+    # coordinator 和 reviewer 是内部节点，不需要流式展示
+    stream_cb = on_token if on_token else (get_streaming_callback(sid) if agent_name == "responder" else None)
     async for chunk in llm.astream(messages):
         if is_stopped(sid):
             logger.info(f"[{agent_name}] Generation stopped by user")
@@ -171,8 +206,8 @@ async def _run_agent(
             if stream_cb:
                 stream_cb(chunk.content)
 
-    # 写入缓存（仅 responder）
-    if cache and is_responder and response:
+    # 写入缓存（responder 和 coordinator）
+    if cache and cache_enabled and response:
         try:
             _provider = get_provider()
             _model = get_model_name()

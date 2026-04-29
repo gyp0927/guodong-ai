@@ -30,6 +30,9 @@ def _get_conn() -> sqlite3.Connection:
     os.makedirs(_DB_DIR, exist_ok=True)
     conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # 启用 WAL 模式，大幅提升并发读写性能
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
