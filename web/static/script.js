@@ -1212,7 +1212,7 @@ function renderModelSwitcherList(configs, activeId) {
   const PROVIDER_ICONS = {
     ollama: "🦙", deepseek: "🔵", qwen: "🐰", minimax: "⚡", doubao: "🦜",
     glm: "📊", ernie: "🟠", hunyuan: "🐧", spark: "✨", kimi: "🌙",
-    "kimi-code": "💻", openai: "🤖", anthropic: "🧠",
+    siliconflow: "🌊", "kimi-code": "💻", openai: "🤖", anthropic: "🧠",
     gemini: "💎", grok: "🐦", mistral: "🌬️", cohere: "🔗", perplexity: "🔍",
     groq: "⚡", together: "🤝", azure: "☁️"
   };
@@ -1221,7 +1221,7 @@ function renderModelSwitcherList(configs, activeId) {
     ollama: "Ollama 本地", deepseek: "DeepSeek", qwen: "阿里 Qwen",
     minimax: "MiniMax", doubao: "字节豆包", glm: "智谱 GLM",
     ernie: "百度文心", hunyuan: "腾讯混元", spark: "讯飞星火",
-    kimi: "月之暗面 Kimi", "kimi-code": "Kimi Code",
+    kimi: "月之暗面 Kimi", siliconflow: "硅基流动", "kimi-code": "Kimi Code",
     openai: "OpenAI", anthropic: "Anthropic", gemini: "Google Gemini",
     grok: "xAI Grok", mistral: "Mistral AI", cohere: "Cohere",
     perplexity: "Perplexity", groq: "Groq", together: "Together AI",
@@ -1290,6 +1290,7 @@ const PROVIDER_MODEL_HINTS = {
   gemini: "gemini-2.0-flash, gemini-1.5-pro",
   qwen: "qwen-plus, qwen-max, qwen-turbo",
   kimi: "kimi-k2.6, kimi-latest",
+  siliconflow: "deepseek-ai/DeepSeek-V3, Qwen/Qwen2.5-72B-Instruct",
   glm: "glm-4-plus, glm-4-flash",
   ollama: "llama3.2, llama3.1:8b, qwen2.5",
   grok: "grok-3, grok-3-mini",

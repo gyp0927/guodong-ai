@@ -118,6 +118,10 @@ PROVIDER_CONFIG = {
         "base_url": "https://api.moonshot.cn/v1",
         "default_model": "kimi-k2.6",
     },
+    "siliconflow": {
+        "base_url": "https://api.siliconflow.cn/v1",
+        "default_model": "deepseek-ai/DeepSeek-V3",
+    },
     "kimi-code": {
         "base_url": "https://api.kimi.com/coding/v1",
         "default_model": "kimi-for-coding",
@@ -257,6 +261,7 @@ PROVIDER_NAMES = {
     "hunyuan": "腾讯混元",
     "spark": "讯飞星火",
     "kimi": "月之暗面 Kimi",
+    "siliconflow": "硅基流动",
     "kimi-code": "Kimi Code",
     "yi": "零一万物 Yi",
     "baichuan": "百川 Baichuan",
