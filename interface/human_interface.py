@@ -7,6 +7,13 @@ from graph.orchestrator import create_coordination_graph, create_fast_graph
 from state.manager import SessionManager
 from core.model_router import get_router
 
+# 认知系统导入
+from cognition.human_mind import HumanMind
+from cognition.types import CognitiveState, ThinkingMode
+
+# Fast graph 需要的搜索函数
+from agents.factory import web_searcher_agent, memory_searcher_agent, responder_node
+
 logger = logging.getLogger(__name__)
 
 
@@ -53,8 +60,13 @@ class HumanInterface:
         self.review_language = review_language
         self.detected_language: str | None = None  # 自动检测的用户语言
 
+        # 初始化认知状态（给这个会话一个"心灵"）
+        self.cognitive_state = CognitiveState()
+        self.human_mind = HumanMind()
+        logger.info("认知系统已初始化：内心独白 + 情感 + 直觉 + 元认知 + 人格")
+
         if fast_mode or coordinator is None:
-            self.graph = create_fast_graph(responder)
+            self.graph = create_fast_graph(web_searcher_agent, memory_searcher_agent, responder_node)
         else:
             self.graph = create_coordination_graph(coordinator, researcher, responder)
 
@@ -77,6 +89,8 @@ class HumanInterface:
 
         self.messages.add_human_message(content)
 
+        # 序列化认知状态
+        from dataclasses import asdict
         initial_state = {
             "messages": self.messages.get_messages_for_model(max_turns=10),
             "active_agent": None,
@@ -85,11 +99,17 @@ class HumanInterface:
             "base_model_response": None,
             "review_result": None,
             "awaiting_review": False,
+            "cognitive_state": asdict(self.cognitive_state),
         }
 
         logger.info(f"Sending message, graph_type={'fast' if self.fast_mode else 'coordination'}")
 
         result = await self.graph.ainvoke(initial_state)
+
+        # 保存更新后的认知状态
+        if result.get("cognitive_state"):
+            self.cognitive_state = CognitiveState(**result["cognitive_state"])
+            logger.info(f"认知状态已更新，当前turn={self.cognitive_state.turn_count}")
 
         # 将 agent 响应添加到消息管理器
         for msg in result["messages"]:
@@ -113,6 +133,7 @@ class HumanInterface:
         from prompts.reviewer_prompt import build_review_prompt
         review_prompt = build_review_prompt(user_message, base_response, self.review_language)
 
+        from dataclasses import asdict
         review_state = {
             "messages": [HumanMessage(content=review_prompt)],
             "active_agent": "reviewer",
@@ -121,9 +142,15 @@ class HumanInterface:
             "base_model_response": base_response,
             "review_result": None,
             "awaiting_review": False,
+            "cognitive_state": asdict(self.cognitive_state),
         }
 
         result = await self.reviewer(review_state)
+
+        # 保存审查后的认知状态
+        if result.get("cognitive_state"):
+            self.cognitive_state = CognitiveState(**result["cognitive_state"])
+
         msgs = result.get("messages", [])
         for msg in reversed(msgs):
             if isinstance(msg, AIMessage):

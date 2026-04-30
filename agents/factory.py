@@ -15,6 +15,10 @@ from prompts.coordinator_prompt import COORDINATOR_PROMPT
 from prompts.reviewer_prompt import get_reviewer_prompt
 from state.stop_flag import is_stopped
 
+# 认知系统导入
+from cognition.human_mind import HumanMind
+from cognition.types import CognitiveState, ThinkingMode
+
 # 全局共享的 HTTP 客户端（连接池复用）
 _httpx_client = None
 
@@ -151,14 +155,30 @@ def clear_llm_cache():
     logger.info("LLM cache cleared")
 
 
+def _get_cognitive_state(state: dict) -> CognitiveState:
+    """从 state 中提取或创建认知状态"""
+    cog_dict = state.get("cognitive_state")
+    if cog_dict:
+        return CognitiveState(**cog_dict)
+    return CognitiveState()
+
+
+def _save_cognitive_state(state: dict, cognitive_state: CognitiveState) -> None:
+    """将认知状态保存回 state"""
+    from dataclasses import asdict
+    state["cognitive_state"] = asdict(cognitive_state)
+
+
 async def _run_agent(
     state: dict,
     system_prompt: str,
     agent_name: str,
     sid: Optional[str] = None,
     on_token: Optional[Callable[[str], None]] = None,
+    enable_cognition: bool = True,
+    enable_monologue: bool = True,
 ) -> dict:
-    """通用 Agent 执行函数。
+    """通用 Agent 执行函数（增强版，接入认知系统）。
 
     参数:
         state: 当前状态字典
@@ -166,9 +186,33 @@ async def _run_agent(
         agent_name: Agent 名称（用于日志和消息标记）
         sid: Socket ID（用于隔离停止标志）
         on_token: 每收到一个 token chunk 时调用的回调函数(token_text: str)
+        enable_cognition: 是否启用认知系统
+        enable_monologue: 是否启用内心独白（coordinator等短输出agent可关闭）
     """
+    # 认知系统初始化
+    cognitive_state = _get_cognitive_state(state)
+    # Coordinator 和 Reviewer 禁用内心独白（输出格式严格限制）
+    should_use_monologue = enable_monologue and agent_name not in ("coordinator",)
+    mind = HumanMind(
+        enable_monologue=should_use_monologue,
+        enable_emotion=True,
+        enable_intuition=True,
+        enable_metacognition=agent_name == "responder",  # 只有responder启用元认知
+        enable_persona=True,
+    ) if enable_cognition else None
+    query = state["messages"][-1].content if state["messages"] else ""
+
+    # 用认知系统增强提示词
+    enhanced_prompt = system_prompt
+    had_monologue = False
+    if mind and enable_cognition:
+        enhanced_prompt, had_monologue = mind.enhance_prompt(
+            agent_name, system_prompt, query, cognitive_state
+        )
+        logger.debug(f"[{agent_name}] 认知增强完成，内心独白={had_monologue}")
+
     llm = get_llm(sid or "")
-    messages = [SystemMessage(content=system_prompt)] + list(state["messages"])
+    messages = [SystemMessage(content=enhanced_prompt)] + list(state["messages"])
 
     logger.debug(f"[{agent_name}] Starting generation, messages_count={len(messages)}")
 
@@ -224,13 +268,28 @@ async def _run_agent(
         except (OSError, ValueError) as e:
             logger.warning(f"Cache write failed: {e}")
 
+    # 用认知系统处理响应
+    if mind and enable_cognition:
+        response = mind.process_response(
+            agent_name, query, response, cognitive_state, had_monologue
+        )
+        # 保存更新后的认知状态
+        _save_cognitive_state(state, cognitive_state)
+        logger.info(f"[{agent_name}] 💭 认知处理完成，turn={cognitive_state.turn_count}")
+
     logger.debug(f"[{agent_name}] Generation complete, response_length={len(response)}")
-    return {"messages": [AIMessage(content=response, name=agent_name)]}
+    result_dict = {"messages": [AIMessage(content=response, name=agent_name)]}
+    # 将认知状态返回，以便langgraph合并到全局状态
+    if enable_cognition:
+        from dataclasses import asdict
+        result_dict["cognitive_state"] = asdict(cognitive_state)
+    return result_dict
 
 
 async def coordinator_node(state: dict, sid: str | None = None) -> dict:
-    """协调者Agent - 分析需求并决定路由"""
-    return await _run_agent(state, COORDINATOR_PROMPT, "coordinator", sid)
+    """协调者Agent - 分析需求并决定路由（启用认知系统）"""
+    # Coordinator 关闭内心独白（输出格式限制），但启用情感和直觉
+    return await _run_agent(state, COORDINATOR_PROMPT, "coordinator", sid, enable_cognition=True)
 
 
 async def web_searcher_agent(query: str) -> str:
@@ -339,7 +398,7 @@ async def researcher_node(state: dict, sid: str | None = None) -> dict:
 
 
 async def responder_node(state: dict, sid: str | None = None) -> dict:
-    """响应者Agent - 生成最终回答"""
+    """响应者Agent - 生成最终回答（完整认知系统）"""
     plugin_prompt = get_plugins_prompt()
 
     # 读取自动检测到的用户语言（从 task_context 中获取）
@@ -357,6 +416,7 @@ async def responder_node(state: dict, sid: str | None = None) -> dict:
     }
     lang_instr = lang_instructions.get(detected_lang, "")
 
+    # 基础提示词（认知系统会在此基础上叠加人格、情感等元素）
     responder_prompt = f"""你是 ResponderBot（果冻ai），一位乐于助人且友善的助手。
 
 你的职责是：
@@ -366,13 +426,15 @@ async def responder_node(state: dict, sid: str | None = None) -> dict:
 {plugin_prompt}{lang_instr}
 
 重要：每次回答时，你必须以"我是果冻ai"开头，然后再根据上下文生成最终回答。"""
-    return await _run_agent(state, responder_prompt, "responder", sid)
+
+    # 启用完整认知系统（内心独白 + 情感 + 直觉 + 元认知 + 人格）
+    return await _run_agent(state, responder_prompt, "responder", sid, enable_cognition=True)
 
 
 async def reviewer_node(state: dict, language: str = "zh", sid: str | None = None) -> dict:
-    """检查者Agent - 审查回答质量"""
+    """检查者Agent - 审查回答质量（启用认知系统）"""
     reviewer_prompt = get_reviewer_prompt(language)
-    return await _run_agent(state, reviewer_prompt, "reviewer", sid)
+    return await _run_agent(state, reviewer_prompt, "reviewer", sid, enable_cognition=True)
 
 
 PLANNER_PROMPT = """你是 PlannerBot（果冻ai团队的任务规划专家）。

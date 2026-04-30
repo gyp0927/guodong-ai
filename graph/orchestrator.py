@@ -3,6 +3,23 @@ from langgraph.types import Send
 
 from state.types import AgentState
 
+# 认知系统导入
+from cognition.intuition import get_intuition_engine
+from cognition.types import ThinkingMode
+
+
+# 辅助函数：从state中提取和保存cognitive_state
+def _get_cognitive_state_from_agent_state(state: AgentState) -> dict:
+    return state.get("cognitive_state") or {}
+
+
+def _make_result_with_cognitive_state(state: AgentState, result: dict) -> dict:
+    """确保返回结果中包含cognitive_state"""
+    cog = _get_cognitive_state_from_agent_state(state)
+    if cog:
+        result["cognitive_state"] = cog
+    return result
+
 
 _RESEARCH_KEYWORDS = [
     "search", "find", "research", "look up",
@@ -127,42 +144,78 @@ def create_fast_graph(web_searcher, memory_searcher, responder_agent):
         # 检查 task_context 中是否已有意图判断
         intent = state.get("task_context", {}).get("intent_result")
         if intent and intent.get("skip_search"):
-            return {"messages": []}
+            return _make_result_with_cognitive_state(state, {"messages": []})
         result = await web_searcher(query)
         if result:
             from langchain_core.messages import SystemMessage
-            return {"messages": [SystemMessage(content=result)]}
-        return {"messages": []}
+            return _make_result_with_cognitive_state(state, {
+                "messages": [SystemMessage(content=result)]
+            })
+        return _make_result_with_cognitive_state(state, {"messages": []})
 
     async def memory_searcher_node(state: AgentState) -> dict:
         """记忆搜索节点——根据意图结果决定是否执行"""
         query = state["messages"][-1].content
         intent = state.get("task_context", {}).get("intent_result")
         if intent and intent.get("skip_memory"):
-            return {"messages": []}
+            return _make_result_with_cognitive_state(state, {"messages": []})
         user_id = state.get("task_context", {}).get("user_id", "")
         result = await memory_searcher(query, user_id)
         if result:
             from langchain_core.messages import SystemMessage
-            return {"messages": [SystemMessage(content=result)]}
-        return {"messages": []}
+            return _make_result_with_cognitive_state(state, {
+                "messages": [SystemMessage(content=result)]
+            })
+        return _make_result_with_cognitive_state(state, {"messages": []})
 
     def start_parallel_search(state: AgentState):
-        """基于意图识别的智能路由。
+        """基于直觉引擎+意图识别的双层智能路由。
 
-        1. 规则/上下文能确定跳过的 → 直接 Responder（0ms）
-        2. 规则能确定需要搜索的 → 并行搜索
-        3. 不确定的 → 并行搜索（LLM 分类器在节点内异步执行）
+        1. 直觉引擎高信心判断 → 直接路由（0ms）
+        2. 现有意图分类器 → 辅助决策
+        3. 不确定的 → 并行搜索
         """
         from core.intent import classify_intent_sync
 
         query = state["messages"][-1].content
         history = state.get("messages", [])
+        history_turns = len(history) // 2
 
+        # 第一层：直觉引擎（系统1——快速、经验驱动）
+        intuition = get_intuition_engine()
+        intuition_result = intuition.route_decision(query, history_turns)
+
+        # 将直觉结果记录到 task_context
+        state.setdefault("task_context", {})
+        state["task_context"]["intuition_result"] = intuition_result
+        state["task_context"]["thinking_mode"] = intuition_result["thinking_mode"].value
+
+        # 直觉高信心时，直接用直觉决策
+        if intuition_result["intuition_confidence"] > 0.7:
+            state["task_context"]["intent_result"] = {
+                "intent": intuition_result["route"],
+                "confidence": intuition_result["intuition_confidence"],
+                "skip_search": intuition_result["skip_search"],
+                "skip_memory": intuition_result["skip_memory"],
+                "skip_knowledge": intuition_result["skip_knowledge"],
+                "source": "intuition",
+            }
+
+            if intuition_result["skip_search"] and intuition_result["skip_memory"]:
+                return Send("responder", state)
+
+            sends = []
+            if not intuition_result["skip_search"]:
+                sends.append(Send("web_searcher", state))
+            if not intuition_result["skip_memory"]:
+                sends.append(Send("memory_searcher", state))
+            if not sends:
+                return Send("responder", state)
+            return sends
+
+        # 第二层：回退到现有意图分类器（系统2——理性分析）
         result = classify_intent_sync(query, history=history)
 
-        # 将意图结果写入 state（通过 Send 传递）
-        state.setdefault("task_context", {})
         state["task_context"]["intent_result"] = {
             "intent": result.intent,
             "confidence": result.confidence,
