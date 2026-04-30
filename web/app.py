@@ -1583,28 +1583,27 @@ async def _async_handle_message(sid: str, user_message: str, document_context: s
     else:
         _safe_emit("thinking", {"message": "Coordinator 正在分析需求..."})
 
-    # 设置流式输出回调 - 低延迟 batch 策略：每 2 个 token flush，
-    # 或遇到换行/句末标点立即 flush，同时设置 60ms 超时避免单个 token 延迟
+    # 设置流式输出回调 - 超低延迟策略：
+    # 每个 token 立即 flush（避免 batch 累积延迟），
+    # 仅在连续无内容时设置 30ms 兜底超时
     streaming_buffer = {"started": False, "batch": [], "timer": None}
 
     def _do_flush():
         if streaming_buffer["batch"]:
             batch_text = "".join(streaming_buffer["batch"])
             streaming_buffer["batch"].clear()
-            # Use socketio.emit with room=sid to avoid request context issues
-            # when called from threading.Timer callback
             socketio.emit("token_chunk", {"token": batch_text}, room=sid)
         streaming_buffer["timer"] = None
 
     def on_token_chunk(token: str):
         if not streaming_buffer["started"]:
             streaming_buffer["started"] = True
-            # 使用 socketio.emit 避免后台线程中请求上下文丢失的问题
             socketio.emit("stream_start", {"agent": "responder"}, room=sid)
         streaming_buffer["batch"].append(token)
-        # 累积 2 个 token 或包含换行/句末标点时立即 flush
+        # 大多数 token 立即发送，仅在遇到换行/句末时 flush batch
+        # 避免单个 token 的 timer 延迟
         should_flush = (
-            len(streaming_buffer["batch"]) >= 2
+            len(streaming_buffer["batch"]) >= 1
             or "\n" in token
             or (token and token[-1] in ".。!！?？")
         )
@@ -1614,8 +1613,8 @@ async def _async_handle_message(sid: str, user_message: str, document_context: s
                 streaming_buffer["timer"] = None
             _do_flush()
         elif streaming_buffer["timer"] is None:
-            # 启动超时定时器，避免单个 token 延迟
-            streaming_buffer["timer"] = threading.Timer(0.06, _do_flush)
+            # 30ms 兜底超时（原来 60ms，减少感知延迟）
+            streaming_buffer["timer"] = threading.Timer(0.03, _do_flush)
             streaming_buffer["timer"].start()
 
     def flush_tokens():

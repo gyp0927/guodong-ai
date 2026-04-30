@@ -199,14 +199,15 @@ async def _run_agent(
     """
     # 认知系统初始化
     cognitive_state = get_cognitive_state_from_dict(state)
-    # Coordinator 和 Reviewer 禁用内心独白（输出格式严格限制）
-    should_use_monologue = enable_monologue and agent_name not in ("coordinator",)
+    # Coordinator/Reviewer 是纯功能节点，禁用会干扰输出格式的人格/独白
+    # Responder 是唯一需要完整认知系统的节点
+    is_responder = agent_name == "responder"
     mind = HumanMind(
-        enable_monologue=should_use_monologue,
-        enable_emotion=True,
-        enable_intuition=True,
-        enable_metacognition=agent_name == "responder",  # 只有responder启用元认知
-        enable_persona=True,
+        enable_monologue=enable_monologue and is_responder,
+        enable_emotion=is_responder,           # 只有 responder 需要情感表达
+        enable_intuition=True,                 # 所有节点共享直觉上下文
+        enable_metacognition=is_responder,     # 只有 responder 需要元认知
+        enable_persona=is_responder,           # 只有 responder 需要人格化
     ) if enable_cognition else None
     query = state["messages"][-1].content if state["messages"] else ""
 
@@ -320,14 +321,23 @@ async def _safe_search(
 
 
 async def web_searcher_agent(query: str) -> str:
-    """联网搜索子 Agent - 执行 DuckDuckGo 搜索并总结结果。"""
+    """联网搜索子 Agent - 执行 DuckDuckGo 搜索并总结结果。
+
+    整体超时 6 秒，避免搜索卡住响应流程。
+    """
     from tools.search import search_and_summarize
 
     def _check(result: str) -> bool:
         return result and "未找到" not in result
 
+    async def _search_with_timeout(q: str) -> str:
+        return await asyncio.wait_for(
+            asyncio.to_thread(search_and_summarize, q, max_results=2),
+            timeout=6.0,
+        )
+
     return await _safe_search(
-        lambda q: asyncio.to_thread(search_and_summarize, q, max_results=3),
+        _search_with_timeout,
         "联网搜索结果",
         query,
         success_check=_check,
