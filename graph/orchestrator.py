@@ -128,74 +128,75 @@ def create_coordination_graph(coordinator_agent, researcher_agent, tool_caller, 
     return workflow.compile()
 
 
+async def _search_node(
+    state: AgentState,
+    search_fn: callable,
+    skip_key: str,
+) -> dict:
+    """通用搜索节点"""
+    query = state["messages"][-1].content
+    intent = state.get("task_context", {}).get("intent_result")
+    if intent and intent.get(skip_key):
+        return _make_result_with_cognitive_state(state, {"messages": []})
+
+    user_id = state.get("task_context", {}).get("user_id", "")
+    result = await search_fn(query, user_id)
+    if result:
+        from langchain_core.messages import SystemMessage
+        return _make_result_with_cognitive_state(state, {
+            "messages": [SystemMessage(content=result)]
+        })
+    return _make_result_with_cognitive_state(state, {"messages": []})
+
+
+def _route_from_intent(
+    state: AgentState,
+    skip_search: bool,
+    skip_memory: bool,
+    need_tools: bool,
+    source: str,
+    confidence: float = 0.0,
+    intent: str = "",
+):
+    """根据意图结果执行统一路由。"""
+    state["task_context"]["intent_result"] = {
+        "intent": intent,
+        "confidence": confidence,
+        "skip_search": skip_search,
+        "skip_memory": skip_memory,
+        "skip_knowledge": skip_search,
+        "source": source,
+    }
+
+    if skip_search and skip_memory and not need_tools:
+        return Send("responder", state)
+
+    sends = []
+    if not skip_search:
+        sends.append(Send("web_searcher", state))
+    if not skip_memory:
+        sends.append(Send("memory_searcher", state))
+    if need_tools:
+        sends.append(Send("tool_caller", state))
+    if not sends:
+        return Send("responder", state)
+    return sends
+
+
 def create_fast_graph(web_searcher, memory_searcher, tool_caller, responder_agent):
     """快速/计划模式：并行 WebSearcher + MemorySearcher + ToolCaller → Responder
 
     无 Coordinator，三个子 Agent 按需并行执行，Responder 只负责生成。
     """
 
-    async def _search_node(
-        state: AgentState,
-        search_fn: callable,
-        skip_key: str,
-        node_name: str,
-    ) -> dict:
-        """通用搜索节点"""
-        query = state["messages"][-1].content
-        intent = state.get("task_context", {}).get("intent_result")
-        if intent and intent.get(skip_key):
-            return _make_result_with_cognitive_state(state, {"messages": []})
-
-        user_id = state.get("task_context", {}).get("user_id", "")
-        result = await search_fn(query, user_id) if node_name == "memory" else await search_fn(query)
-        if result:
-            from langchain_core.messages import SystemMessage
-            return _make_result_with_cognitive_state(state, {
-                "messages": [SystemMessage(content=result)]
-            })
-        return _make_result_with_cognitive_state(state, {"messages": []})
-
     async def web_searcher_node(state: AgentState) -> dict:
-        return await _search_node(state, web_searcher, "skip_search", "web")
+        return await _search_node(state, web_searcher, "skip_search")
 
     async def memory_searcher_node(state: AgentState) -> dict:
-        return await _search_node(state, memory_searcher, "skip_memory", "memory")
+        return await _search_node(state, memory_searcher, "skip_memory")
 
     async def tool_caller_node(state: AgentState) -> dict:
         return await tool_caller(state)
-
-    def _route_from_intent(
-        state: AgentState,
-        skip_search: bool,
-        skip_memory: bool,
-        need_tools: bool,
-        source: str,
-        confidence: float = 0.0,
-        intent: str = "",
-    ):
-        """根据意图结果执行统一路由。"""
-        state["task_context"]["intent_result"] = {
-            "intent": intent,
-            "confidence": confidence,
-            "skip_search": skip_search,
-            "skip_memory": skip_memory,
-            "skip_knowledge": skip_search,
-            "source": source,
-        }
-
-        if skip_search and skip_memory and not need_tools:
-            return Send("responder", state)
-
-        sends = []
-        if not skip_search:
-            sends.append(Send("web_searcher", state))
-        if not skip_memory:
-            sends.append(Send("memory_searcher", state))
-        if need_tools:
-            sends.append(Send("tool_caller", state))
-        if not sends:
-            return Send("responder", state)
-        return sends
 
     def start_parallel_search(state: AgentState):
         """快速模式路由：按需并行启动子 Agent。"""
@@ -204,11 +205,8 @@ def create_fast_graph(web_searcher, memory_searcher, tool_caller, responder_agen
         query = state["messages"][-1].content
         history = state.get("messages", [])
         history_turns = len(history) // 2
-
-        # 判断是否需要工具调用
         need_tools = _need_tool_call(query)
 
-        # 第一层：直觉引擎
         intuition = get_intuition_engine()
         intuition_result = intuition.route_decision(query, history_turns)
 
@@ -227,9 +225,7 @@ def create_fast_graph(web_searcher, memory_searcher, tool_caller, responder_agen
                 intent=intuition_result["route"],
             )
 
-        # 第二层：回退到意图分类器
         result = classify_intent_sync(query, history=history)
-
         return _route_from_intent(
             state,
             skip_search=result.skip_search,

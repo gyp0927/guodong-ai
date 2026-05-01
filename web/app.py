@@ -737,48 +737,19 @@ async def _async_handle_message(sid: str, user_message: str, document_context: s
     else:
         _safe_emit("thinking", {"message": "Coordinator 正在分析需求..."})
 
-    # 设置流式输出回调 - 超低延迟策略：
-    # 每个 token 立即 flush（避免 batch 累积延迟），
-    # 仅在连续无内容时设置 30ms 兜底超时
-    streaming_buffer = {"started": False, "batch": [], "timer": None}
-
-    def _do_flush():
-        if streaming_buffer["batch"]:
-            batch_text = "".join(streaming_buffer["batch"])
-            streaming_buffer["batch"].clear()
-            socketio.emit("token_chunk", {"token": batch_text}, room=sid)
-        streaming_buffer["timer"] = None
+    # 设置流式输出回调：直接发送每个 token，零延迟
+    _stream_started = False
 
     def on_token_chunk(token: str):
-        if not streaming_buffer["started"]:
-            streaming_buffer["started"] = True
+        nonlocal _stream_started
+        if not _stream_started:
+            _stream_started = True
             socketio.emit("stream_start", {"agent": "responder"}, room=sid)
-        streaming_buffer["batch"].append(token)
-        # 大多数 token 立即发送，仅在遇到换行/句末时 flush batch
-        # 避免单个 token 的 timer 延迟
-        should_flush = (
-            len(streaming_buffer["batch"]) >= 1
-            or "\n" in token
-            or (token and token[-1] in ".。!！?？")
-        )
-        if should_flush:
-            if streaming_buffer["timer"]:
-                streaming_buffer["timer"].cancel()
-                streaming_buffer["timer"] = None
-            _do_flush()
-        elif streaming_buffer["timer"] is None:
-            # 30ms 兜底超时（原来 60ms，减少感知延迟）
-            streaming_buffer["timer"] = threading.Timer(0.03, _do_flush)
-            streaming_buffer["timer"].start()
+        if token:
+            socketio.emit("token_chunk", {"token": token}, room=sid)
 
     def flush_tokens():
-        if streaming_buffer["timer"]:
-            streaming_buffer["timer"].cancel()
-            streaming_buffer["timer"] = None
-        if streaming_buffer["batch"]:
-            batch_text = "".join(streaming_buffer["batch"])
-            streaming_buffer["batch"].clear()
-            socketio.emit("token_chunk", {"token": batch_text}, room=sid)
+        pass  # 实时发送无需 flush
 
     set_streaming_callback(on_token_chunk, sid)
 
