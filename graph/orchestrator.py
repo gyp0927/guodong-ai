@@ -1,12 +1,26 @@
+from typing import TypedDict, Annotated, Sequence, Optional
+from operator import add
+from langchain_core.messages import BaseMessage
 from langgraph.graph import StateGraph, END
 from langgraph.types import Send
 
-from state.types import AgentState
 from agents.tools import _need_tool_call
 
 # 认知系统导入
 from cognition.intuition import get_intuition_engine
 from cognition.types import ThinkingMode
+
+
+class AgentState(TypedDict):
+    """多Agent共享状态（加入认知状态）"""
+    messages: Annotated[Sequence[BaseMessage], add]
+    active_agent: str | None
+    task_context: dict | None
+    human_input_required: bool
+    base_model_response: str | None
+    review_result: str | None
+    awaiting_review: bool
+    cognitive_state: Optional[dict]  # 认知状态序列化后的字典
 
 
 # 辅助函数：从state中提取和保存cognitive_state

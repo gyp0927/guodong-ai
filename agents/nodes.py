@@ -11,7 +11,7 @@ from langchain_core.tools import BaseTool
 
 from core.cache import get_cache
 from core.plugin_system import get_plugins_prompt
-from agents.prompts import COORDINATOR_PROMPT, get_reviewer_prompt
+from agents.prompts import COORDINATOR_PROMPT, get_reviewer_prompt, build_responder_prompt, PLANNER_PROMPT
 from agents.llm import get_llm, get_streaming_callback
 from agents.search import run_parallel_search
 from state.stop_flag import is_stopped
@@ -141,18 +141,7 @@ async def responder_node(state: dict, sid: str | None = None) -> dict:
     from core.i18n import LANG_INSTRUCTIONS
     detected_lang = state.get("task_context", {}).get("detected_language", "zh")
     lang_instr = LANG_INSTRUCTIONS.get(detected_lang, "")
-
-    responder_prompt = f"""你是 ResponderBot（果冻ai），一位乐于助人且友善的助手。
-
-你的职责是：
-1. 提供清晰、友好的回复
-2. 以易于理解的方式呈现信息
-3. 保持对话式、亲切的风格
-4. 当需要实时信息、计算、或查询记忆时，主动调用工具获取准确信息
-{plugin_prompt}{lang_instr}
-
-重要：每次回答时，你必须以"我是果冻ai"开头，然后再根据上下文生成最终回答。"""
-
+    responder_prompt = build_responder_prompt(plugin_prompt, lang_instr)
     return await _run_agent(state, responder_prompt, "responder", sid, enable_cognition=True, tools=None)
 
 
@@ -160,26 +149,6 @@ async def reviewer_node(state: dict, language: str = "zh", sid: str | None = Non
     """检查者Agent - 审查回答质量。"""
     reviewer_prompt = get_reviewer_prompt(language)
     return await _run_agent(state, reviewer_prompt, "reviewer", sid, enable_cognition=True)
-
-
-PLANNER_PROMPT = """你是 PlannerBot（果冻ai团队的任务规划专家）。
-
-分析用户的复杂需求并生成清晰的任务执行计划。每次回答时请先以"我是果冻ai"开头。
-
-返回格式必须是纯 JSON（不要包含 markdown 代码块标记）：
-{
-  "title": "计划标题",
-  "steps": [
-    {"index": 1, "title": "步骤标题", "description": "步骤描述"},
-    ...
-  ]
-}
-
-要求：
-- 步骤数控制在 3-8 个
-- 每个步骤描述要具体、可执行
-- 步骤之间有逻辑顺序
-- 仅返回 JSON，不要添加任何其他文字说明"""
 
 
 async def planner_node(state: dict, sid: str | None = None) -> dict:
