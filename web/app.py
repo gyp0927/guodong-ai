@@ -697,7 +697,7 @@ async def _async_handle_message(sid: str, user_message: str, document_context: s
     human_msgs = [m for m in messages if getattr(m, "type", None) == "human"]
     if state.detected_language is None:
         state.detected_language = detect_language(user_message)
-        lang_name = _LANG_NAMES.get(state.detected_language, state.detected_language)
+        lang_name = LANG_NAMES.get(state.detected_language, state.detected_language)
         logger.info(f"Auto-detected language for sid={sid}: {state.detected_language} ({lang_name})")
 
     # 传给 LLM 的消息列表（历史 + 当前）
