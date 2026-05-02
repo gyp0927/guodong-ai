@@ -1,7 +1,7 @@
 """联网搜索工具 - 为 Researcher Agent 提供搜索能力。
 
 搜索源优先级：
-1. duckduckgo-search 库（最稳定，已安装）
+1. ddgs 库（最稳定，已安装）
 2. 360 搜索（国内可访问，无需代理）
 3. Bing 搜索（fallback）
 
@@ -134,9 +134,9 @@ def _dedupe_results(results: list[dict], max_results: int) -> list[dict]:
 # ========== 1. duckduckgo-search 库 ==========
 
 def _try_ddg_library(query: str, max_results: int) -> list[dict] | None:
-    """使用 duckduckgo-search 库搜索。"""
+    """使用 ddgs 库搜索。"""
     try:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
         proxies = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         with DDGS(timeout=_SEARCH_TIMEOUT, proxy=proxies) as ddgs:
             raw = ddgs.text(query, max_results=max_results * 2)
