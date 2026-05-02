@@ -33,7 +33,7 @@ async def _safe_search(
     return ""
 
 
-async def web_searcher_agent(query: str) -> str:
+async def web_searcher_agent(query: str, user_id: str = "") -> str:
     """联网搜索子 Agent - 执行 DuckDuckGo 搜索并总结结果。"""
     from tools.search import search_and_summarize
 
@@ -65,7 +65,7 @@ async def memory_searcher_agent(query: str, user_id: str = "") -> str:
     return await _safe_search(_do_search, "记忆检索结果", query, user_id)
 
 
-async def knowledge_searcher_agent(query: str) -> str:
+async def knowledge_searcher_agent(query: str, user_id: str = "") -> str:
     """知识库搜索子 Agent - 从 RAG 向量库检索相关文档。"""
     from core.rag import search_knowledge
 

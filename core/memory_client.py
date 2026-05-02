@@ -40,7 +40,7 @@ try:
     _MEMORY_SYSTEM_AVAILABLE = True
 except Exception as _import_err:  # pragma: no cover
     _MEMORY_SYSTEM_AVAILABLE = False
-    _import_err = _import_err
+    logger.debug(f"Memory system import failed: {_import_err}")
 
 logger = logging.getLogger(__name__)
 

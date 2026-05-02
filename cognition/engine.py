@@ -11,7 +11,7 @@
 import logging
 import re
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 from cognition.types import (
     CognitiveState, EmotionalState, InnerThought, IntuitionResult,
@@ -436,7 +436,7 @@ REVIEWER_PERSONA = PersonaConfig(
 _instances: dict[str, object] = {}
 
 
-def _get_instance(key: str, factory: callable) -> object:
+def _get_instance(key: str, factory: Callable) -> object:
     """统一单例获取。"""
     if key not in _instances:
         _instances[key] = factory()

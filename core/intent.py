@@ -252,7 +252,7 @@ def _context_classify(query: str, history: list[BaseMessage]) -> Optional[Intent
         # 检查上一条是不是 AI 的回答
         last_ai_msg = None
         for msg in reversed(history[:-1]):  # 排除当前消息
-            if getattr(msg, "type", None) == "ai" or isinstance(msg.__class__.__name__, str):
+            if getattr(msg, "type", None) == "ai":
                 last_ai_msg = msg
                 break
         if last_ai_msg:

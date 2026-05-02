@@ -679,7 +679,10 @@ async def _async_handle_message(sid: str, user_message: str, document_context: s
 
     # 获取历史消息（快速模式保留 5 轮，协调模式 10 轮）
     history_turns = 5 if state.fast_mode else 10
-    messages = list(state.msg_manager.get_messages_for_model(max_turns=history_turns))
+    raw_messages = list(state.msg_manager.get_messages_for_model(max_turns=history_turns))
+
+    # 过滤掉 content 为空的 assistant 消息（避免 API 400 错误）
+    messages = [m for m in raw_messages if getattr(m, "content", "") or getattr(m, "type", None) != "ai"]
 
     # 构建当前用户消息（用于传给 LLM，但先不保存到数据库）
     current_msg = HumanMessage(content=user_message, name="Human")
@@ -694,7 +697,6 @@ async def _async_handle_message(sid: str, user_message: str, document_context: s
 
     # === 自动语言检测（仅第一条用户消息） ===
     # 如果当前会话还没有检测过语言，且这是第一条用户消息，进行检测
-    human_msgs = [m for m in messages if getattr(m, "type", None) == "human"]
     if state.detected_language is None:
         state.detected_language = detect_language(user_message)
         lang_name = LANG_NAMES.get(state.detected_language, state.detected_language)
@@ -714,6 +716,7 @@ async def _async_handle_message(sid: str, user_message: str, document_context: s
             "detected_language": state.detected_language,
             "user_id": state.user_id,
             "mode": current_mode,
+            "sid": sid,
         },
         "human_input_required": False,
         "base_model_response": None,
@@ -819,7 +822,9 @@ async def _async_handle_message(sid: str, user_message: str, document_context: s
     base_response = final_state["messages"][-1].content
     state.current_base_response = base_response
 
-    state.msg_manager.add_agent_message(base_response, "base_model")
+    # 避免保存空响应到历史记录
+    if base_response:
+        state.msg_manager.add_agent_message(base_response, "base_model")
 
     # === 保存对话记忆到自适应记忆系统 ===
     if _MEMORY_SYSTEM_AVAILABLE:
@@ -847,7 +852,7 @@ async def _async_handle_message(sid: str, user_message: str, document_context: s
             logger.warning(f"Failed to save conversation memory: {e}")
 
     # 发送流式结束标记（如果使用了流式输出）
-    if streaming_buffer["started"]:
+    if _stream_started:
         _safe_emit("stream_end", {"message": base_response, "awaiting_review": True})
     else:
         # 未使用流式输出（如 fast_mode），一次性发送完整消息
@@ -1025,6 +1030,7 @@ def handle_get_sessions():
 @socketio.on("get_model_info")
 def handle_get_model_info():
     sid = request.sid
+    cfg = None
     with _socket_configs_lock:
         cfg = socket_configs.get(sid)
     if cfg:

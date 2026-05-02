@@ -47,6 +47,10 @@ async def _run_agent(
     tools: Optional[list[BaseTool]] = None,
 ) -> dict:
     """通用 Agent 执行函数（接入认知系统 + 工具调用）。"""
+    # 从 state 中获取 sid（如果参数未提供）
+    if sid is None:
+        sid = state.get("task_context", {}).get("sid", "")
+
     cognitive_state = get_cognitive_state_from_dict(state)
     is_responder = agent_name == "responder"
     mind = HumanMind(
@@ -77,7 +81,7 @@ async def _run_agent(
     if cache and cache_enabled:
         try:
             cached = cache.get(messages, cache_key[0], cache_key[1])
-            if cached is not None:
+            if cached is not None and cached.strip():
                 logger.info(f"[{agent_name}] Cache hit")
                 if agent_name == "coordinator":
                     return {"messages": [AIMessage(content=cached, name=agent_name)]}
@@ -98,13 +102,30 @@ async def _run_agent(
     else:
         response = ""
         stream_cb = on_token if on_token else (get_streaming_callback(sid) if agent_name == "responder" else None)
-        async for chunk in llm.astream(messages):
-            if is_stopped(sid):
-                break
-            if chunk.content:
-                response += chunk.content
-                if stream_cb:
-                    stream_cb(chunk.content)
+        try:
+            async for chunk in llm.astream(messages):
+                if is_stopped(sid):
+                    break
+                if chunk.content:
+                    response += chunk.content
+                    if stream_cb:
+                        stream_cb(chunk.content)
+        except Exception as e:
+            error_msg = str(e)
+            if "RemoteProtocolError" in error_msg or "peer closed connection" in error_msg or "incomplete chunked read" in error_msg:
+                logger.warning(f"[{agent_name}] Streaming interrupted, retrying once: {e}")
+                if response:
+                    logger.info(f"[{agent_name}] Returning partial response ({len(response)} chars)")
+                else:
+                    async for chunk in llm.astream(messages):
+                        if is_stopped(sid):
+                            break
+                        if chunk.content:
+                            response += chunk.content
+                            if stream_cb:
+                                stream_cb(chunk.content)
+            else:
+                raise
 
     if cache and cache_enabled and response:
         try:
@@ -115,6 +136,10 @@ async def _run_agent(
     if mind and enable_cognition:
         response = mind.process_response(agent_name, query, response, cognitive_state, had_monologue)
         save_cognitive_state_to_dict(state, cognitive_state)
+
+    # 避免返回空的 assistant 消息（会导致 API 400 错误）
+    if not response:
+        return {"messages": []}
 
     return _build_result_dict(response, agent_name, cognitive_state if enable_cognition else None)
 

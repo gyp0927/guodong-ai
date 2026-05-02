@@ -36,6 +36,10 @@ async def tool_caller_node(state: dict, sid: str | None = None) -> dict:
 
     结果以 SystemMessage 注入 Responder 上下文。
     """
+    # 从 state 中获取 sid（如果参数未提供）
+    if sid is None:
+        sid = state.get("task_context", {}).get("sid", "")
+
     query = state["messages"][-1].content if state["messages"] else ""
 
     if not _need_tool_call(query):

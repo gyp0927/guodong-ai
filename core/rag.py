@@ -4,6 +4,7 @@
 支持文档分块、嵌入、检索。
 """
 
+import json
 import logging
 import os
 import threading
