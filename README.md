@@ -169,7 +169,7 @@ Researcher ──────→ Responder
 ## 📂 项目结构
 
 ```
-jelly-ai/
+karen/
 ├── agents/                  # Agent 工厂与定义
 │   └── factory.py
 ├── core/                    # 核心功能模块
@@ -288,4 +288,4 @@ exit       退出程序
 
 ---
 
-<p align="center">Made with 🍮 by 果冻ai Team</p>
+<p align="center">Made by 凯伦 Team</p>

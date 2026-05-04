@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 async def main():
     print("=" * 50)
-    print("果冻ai")
+    print("凯伦")
     print("=" * 50)
     print("\nInitializing agents...")
 

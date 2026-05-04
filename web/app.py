@@ -568,7 +568,7 @@ def on_connect():
             else:
                 logger.warning(f"Invalid api_key from sid={sid}")
 
-    emit("status", {"message": "Connected to 果冻ai"})
+    emit("status", {"message": "Connected to 凯伦"})
     emit("auth_status", {"enabled": AUTH_ENABLED})
     _send_history(sid)
 
@@ -776,6 +776,7 @@ async def _async_handle_message(sid: str, user_message: str, document_context: s
             "user_input": user_message,
             "detected_language": state.detected_language,
             "user_id": state.user_id,
+            "session_id": expected_session_id,
             "mode": current_mode,
             "sid": sid,
         },
@@ -888,27 +889,29 @@ async def _async_handle_message(sid: str, user_message: str, document_context: s
         state.msg_manager.add_agent_message(base_response, "base_model")
 
     # === 保存对话记忆到自适应记忆系统 ===
+    # source=session_id 是为了让 delete_session 能 cascade 清掉本会话的记忆,
+    # 不影响其他会话。user_id 退到 tags 里保留追踪能力。
     if _MEMORY_SYSTEM_AVAILABLE:
         try:
             store = get_memory_store()
-            source = state.user_id or sid
+            user_tag = f"user_{state.user_id}" if state.user_id else f"sid_{sid}"
             # 保存用户输入作为 observation
             await store.save_memory(
                 content=f"用户说: {user_message}",
                 memory_type="observation",
-                source=source,
+                source=expected_session_id,
                 importance=0.4,
-                tags=["user_input", f"session_{expected_session_id}"],
+                tags=["user_input", user_tag],
             )
             # 保存 AI 回复作为 observation
             await store.save_memory(
                 content=f"AI回复: {base_response[:500]}",  # 限制长度避免过大
                 memory_type="observation",
-                source=source,
+                source=expected_session_id,
                 importance=0.3,
-                tags=["ai_response", f"session_{expected_session_id}"],
+                tags=["ai_response", user_tag],
             )
-            logger.debug(f"Conversation memories saved for sid={sid}")
+            logger.debug(f"Conversation memories saved for sid={sid} session={expected_session_id}")
         except Exception as e:
             logger.warning(f"Failed to save conversation memory: {e}")
 
@@ -1072,6 +1075,17 @@ def handle_delete_session(data):
             "sessions": state.msg_manager.list_sessions()
         })
         _send_history(sid)
+        # cascade 清记忆: source=session_id 的记忆从 hot+cold 一起清,
+        # 不影响其他会话。fire-and-forget 不阻塞 UI。
+        if _MEMORY_SYSTEM_AVAILABLE and session_id:
+            def _bg_clear_memories():
+                try:
+                    n = asyncio.run(get_memory_store().delete_session_memories(session_id))
+                    if n:
+                        logger.info(f"Cleared {n} memories for deleted session {session_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to clear memories for session {session_id}: {e}")
+            threading.Thread(target=_bg_clear_memories, name=f"clear-mem-{session_id[:8]}", daemon=True).start()
     else:
         emit("error", {"message": "删除失败"})
 
@@ -1546,6 +1560,7 @@ async def _async_execute_plan_step(sid: str, step_index: int, expected_session_i
             "step_index": step_index,
             "detected_language": state.detected_language,
             "user_id": state.user_id,
+            "session_id": expected_session_id,
             "mode": "planning",
         },
         "human_input_required": False,

@@ -215,13 +215,15 @@ class AgentMemoryStore:
         query: str,
         top_k: int = 5,
         user_id: str = "",
+        source: str = "",
     ) -> list[dict[str, Any]]:
         """Retrieve semantically relevant memories.
 
         Args:
             query: The user's question / search text.
             top_k: Maximum number of memories to return.
-            user_id: Optional user ID for source filtering (not yet enforced).
+            user_id: Optional user ID (kept for back-compat, not used for filtering).
+            source: 会话隔离用。传 session_id 时只返该会话的记忆。空串=不过滤。
 
         Returns:
             List of memory dicts with keys: memory_id, content, score, tier,
@@ -231,7 +233,8 @@ class AgentMemoryStore:
             await self.initialize()
 
         retriever: UnifiedRetriever = self._services["retriever"]
-        result = await retriever.query(query_text=query, top_k=top_k)
+        filters = {"source": source} if source else None
+        result = await retriever.query(query_text=query, top_k=top_k, filters=filters)
 
         memories = []
         for chunk in result.chunks:
@@ -314,6 +317,26 @@ class AgentMemoryStore:
             }
             for r in results
         ]
+
+    async def delete_session_memories(self, session_id: str) -> int:
+        """删除某个会话的全部记忆(hot+cold tier 一起清,不影响其他会话)。
+
+        save_memory 时把 session_id 写到 source 字段,这里按 source 反查删除。
+        会话删除路径调用,不阻塞 UI(调用方建议 fire-and-forget)。
+
+        Returns: 删除的记忆条数,会话 ID 为空或不存在记忆时返回 0。
+        """
+        if not session_id:
+            return 0
+        if not self._initialized:
+            await self.initialize()
+        pipeline: MemoryPipeline = self._services["pipeline"]
+        deleted = await pipeline.delete_by_source(session_id)
+        # 清 retriever 5s TTL cache,否则刚删的记忆仍可能在缓存里返
+        if deleted:
+            retriever: UnifiedRetriever = self._services["retriever"]
+            retriever._cache.clear()
+        return deleted
 
     # ------------------------------------------------------------------
     # Helpers

@@ -9,7 +9,7 @@ from hot_and_cold_memory.core.config import Tier, get_settings
 from hot_and_cold_memory.core.logging import get_logger
 from hot_and_cold_memory.frequency.tracker import FrequencyTracker
 from hot_and_cold_memory.monitoring.metrics import MEMORIES_TOTAL
-from hot_and_cold_memory.storage.metadata_store.base import BaseMetadataStore
+from hot_and_cold_memory.storage.metadata_store.base import BaseMetadataStore, MemoryItem
 from hot_and_cold_memory.tiers.cold_tier import ColdTier
 from hot_and_cold_memory.tiers.hot_tier import HotTier
 
@@ -228,6 +228,44 @@ class MemoryPipeline:
 
         logger.info("memory_deleted", memory_id=str(memory_id))
         return True
+
+    async def delete_by_source(self, source: str) -> int:
+        """删除 source 匹配的全部记忆,hot+cold 一起清。
+
+        会话删除时调用,source=session_id 的记忆全清。
+        分页查 metadata 后按 tier 分发到对应 tier.delete(级联清 vector/doc/cache)。
+        """
+        if not source:
+            return 0
+
+        all_metas: list[MemoryItem] = []
+        offset = 0
+        page_size = 500
+        while True:
+            page = await self.metadata_store.list_memories(
+                source=source, limit=page_size, offset=offset,
+            )
+            if not page:
+                break
+            all_metas.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
+
+        if not all_metas:
+            return 0
+
+        hot_ids = [m.memory_id for m in all_metas if m.tier == Tier.HOT]
+        cold_ids = [m.memory_id for m in all_metas if m.tier == Tier.COLD]
+
+        deleted = 0
+        if hot_ids:
+            deleted += await self.hot_tier.delete(hot_ids)
+        if cold_ids:
+            deleted += await self.cold_tier.delete(cold_ids)
+
+        logger.info("memories_deleted_by_source", source=source, count=deleted)
+        return deleted
 
     async def _enforce_hot_tier_capacity(self) -> None:
         """If hot tier exceeds capacity, evict the coldest memories to cold tier."""

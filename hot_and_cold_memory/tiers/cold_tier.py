@@ -88,6 +88,7 @@ class ColdTier(BaseTier):
             "tier": Tier.COLD.value,
             "tags": m.tags or [],
             "compressed": True,
+            "source": source or "",
         } for m in memories]
 
         await self.vector_store.upsert(
@@ -163,6 +164,7 @@ class ColdTier(BaseTier):
             "tier": Tier.COLD.value,
             "tags": m.tags or [],
             "compressed": False,
+            "source": source or "",
         } for m in memories]
 
         await self.vector_store.upsert(

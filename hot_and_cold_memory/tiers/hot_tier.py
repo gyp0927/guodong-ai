@@ -78,6 +78,7 @@ class HotTier(BaseTier):
             "memory_id": str(m.memory_id),
             "tier": Tier.HOT.value,
             "tags": m.tags or [],
+            "source": source or "",
         } for m in memories]
 
         await self.vector_store.upsert(

@@ -127,7 +127,7 @@ class MetacognitionResult:
 @dataclass
 class PersonaConfig:
     """人格配置"""
-    name: str = "果冻ai"
+    name: str = "凯伦"
     core_values: list[str] = field(default_factory=lambda: [
         "真诚", "好奇", "谦逊", "乐于助人"
     ])

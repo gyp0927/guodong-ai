@@ -68,7 +68,7 @@ async def test_responder():
     result = await responder_node(state)
     assert "messages" in result
     assert len(result["messages"]) > 0
-    # 不再断言"我是果冻ai"前缀(已从 prompt 中清掉)
+    # 不再断言"我是凯伦"前缀(已从 prompt 中清掉)
 
 # ========== 测试 3: 搜索子 Agent ==========
 @test("搜索子 Agent - 联网搜索")
@@ -215,7 +215,7 @@ async def test_chat_coordination():
     assert "messages" in final_state
     assert len(final_state["messages"]) > 0
     response = final_state["messages"][-1].content
-    assert response  # 只断言非空,不再要求"我是果冻ai"前缀
+    assert response  # 只断言非空,不再要求"我是凯伦"前缀
 
 # ========== 测试 11: 端到端聊天（快速模式）==========
 @test("端到端 - 快速模式")
@@ -251,12 +251,12 @@ async def test_chat_fast():
     assert "messages" in final_state
     assert len(final_state["messages"]) > 0
     response = final_state["messages"][-1].content
-    assert response  # 不再要求 "我是果冻ai"
+    assert response  # 不再要求 "我是凯伦"
 
 
 async def main():
     print("=" * 60)
-    print("果冻ai 全功能测试")
+    print("凯伦 全功能测试")
     print("=" * 60)
 
     tests = [

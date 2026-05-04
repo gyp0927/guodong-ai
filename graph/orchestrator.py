@@ -147,7 +147,8 @@ async def _search_node(
         return _make_result_with_cognitive_state(state, {"messages": []})
 
     user_id = state.get("task_context", {}).get("user_id", "")
-    result = await search_fn(query, user_id)
+    session_id = state.get("task_context", {}).get("session_id", "")
+    result = await search_fn(query, user_id, session_id=session_id)
     if result:
         from langchain_core.messages import SystemMessage
         # SystemMessage 必须显式指令"基于以上结果"，否则 LLM 会忽略检索文本回退到训练知识。

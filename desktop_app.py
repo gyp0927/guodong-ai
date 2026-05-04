@@ -129,7 +129,7 @@ if __name__ == "__main__":
         print("Initializing agents...")
         init_agents()
         print("Agents initialized!")
-        print("Starting 果冻ai Desktop App...")
+        print("Starting 凯伦 Desktop App...")
         print("Open http://127.0.0.1:5000/config in your browser")
         print("LAN access: http://0.0.0.0:5000")
         import webbrowser

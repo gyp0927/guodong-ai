@@ -192,7 +192,7 @@ def main():
 
     # 创建窗口
     window = webview.create_window(
-        title='果冻ai',
+        title='凯伦',
         url=f'http://127.0.0.1:{port}',
         width=1400,
         height=900,

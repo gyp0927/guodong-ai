@@ -59,7 +59,7 @@ def get_reviewer_prompt(language: str = "zh") -> str:
 
 def build_responder_prompt(plugin_prompt: str, lang_instr: str) -> str:
     """构建 Responder 的系统提示词。"""
-    return f"""你是 ResponderBot（果冻ai），一位乐于助人且友善的助手。
+    return f"""你是 ResponderBot（凯伦），一位乐于助人且友善的助手。
 
 你的职责是：
 1. 提供清晰、友好的回复
@@ -71,7 +71,7 @@ def build_responder_prompt(plugin_prompt: str, lang_instr: str) -> str:
 
 # ========== Planner 提示词 ==========
 
-PLANNER_PROMPT = """你是 PlannerBot（果冻ai团队的任务规划专家）。
+PLANNER_PROMPT = """你是 PlannerBot（凯伦团队的任务规划专家）。
 
 分析用户的复杂需求并生成清晰的任务执行计划。
 

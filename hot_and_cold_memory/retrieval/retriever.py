@@ -72,6 +72,10 @@ class _TTLCache:
         while len(self._store) > self.maxsize:
             self._store.pop(next(iter(self._store)))
 
+    def clear(self) -> None:
+        """清空全部缓存。删记忆后调,避免 5s TTL 内仍返回已删的旧结果。"""
+        self._store.clear()
+
 
 class UnifiedRetriever:
     """Unified retrieval interface that handles all retrieval operations.

@@ -43,7 +43,7 @@ async def _safe_search(
     return ""
 
 
-async def web_searcher_agent(query: str, user_id: str = "") -> str:
+async def web_searcher_agent(query: str, user_id: str = "", session_id: str = "") -> str:
     """联网搜索子 Agent - 执行 DuckDuckGo 搜索并总结结果。"""
     from tools.search import search_and_summarize
 
@@ -59,23 +59,26 @@ async def web_searcher_agent(query: str, user_id: str = "") -> str:
     return await _safe_search(_search_with_timeout, "联网搜索结果", query, success_check=_check)
 
 
-async def memory_searcher_agent(query: str, user_id: str = "") -> str:
-    """记忆搜索子 Agent - 从自适应记忆系统检索相关记忆。"""
+async def memory_searcher_agent(query: str, user_id: str = "", session_id: str = "") -> str:
+    """记忆搜索子 Agent - 从自适应记忆系统检索相关记忆。
+
+    session_id 非空时按会话隔离,只检索本会话写入的记忆;空串=不过滤(全局检索)。
+    """
     from core.memory_client import get_memory_store, _MEMORY_SYSTEM_AVAILABLE
 
-    async def _do_search(q: str, uid: str) -> str:
+    async def _do_search(q: str, uid: str, sess: str) -> str:
         if not _MEMORY_SYSTEM_AVAILABLE:
             return ""
         store = get_memory_store()
         memories = await asyncio.wait_for(
-            store.retrieve(q, top_k=5, user_id=uid),
+            store.retrieve(q, top_k=5, user_id=uid, source=sess),
             timeout=MEMORY_SEARCH_TIMEOUT_S,
         )
         if memories:
             return store.format_memories_for_prompt(memories) or ""
         return ""
 
-    return await _safe_search(_do_search, "记忆检索结果", query, user_id)
+    return await _safe_search(_do_search, "记忆检索结果", query, user_id, session_id)
 
 
 async def knowledge_searcher_agent(query: str, user_id: str = "") -> str:
@@ -98,14 +101,15 @@ async def run_parallel_search(state: dict) -> str:
     user_message = state["messages"][-1].content
     mode = state.get("task_context", {}).get("mode", "coordination")
     user_id = state.get("task_context", {}).get("user_id", "")
+    session_id = state.get("task_context", {}).get("session_id", "")
 
     tasks = []
     if mode in ("fast", "planning"):
         tasks.append(web_searcher_agent(user_message))
-        tasks.append(memory_searcher_agent(user_message, user_id))
+        tasks.append(memory_searcher_agent(user_message, user_id, session_id))
     else:
         tasks.append(web_searcher_agent(user_message))
-        tasks.append(memory_searcher_agent(user_message, user_id))
+        tasks.append(memory_searcher_agent(user_message, user_id, session_id))
         tasks.append(knowledge_searcher_agent(user_message))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)

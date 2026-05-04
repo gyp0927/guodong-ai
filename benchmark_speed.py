@@ -84,7 +84,7 @@ async def benchmark_coordination():
 
 async def main():
     print("=" * 60)
-    print("果冻ai 响应速度基准测试")
+    print("凯伦 响应速度基准测试")
     print("=" * 60)
 
     # 预热（加载模型、建立连接）
