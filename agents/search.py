@@ -6,6 +6,10 @@ from typing import Callable
 
 logger = logging.getLogger(__name__)
 
+# 子 Agent 的搜索超时（秒）。比单源搜索的内部超时大,留出 fallback 时间。
+WEB_SEARCH_TIMEOUT_S = 12.0
+MEMORY_SEARCH_TIMEOUT_S = 3.0
+
 
 async def _safe_search(
     search_fn: Callable,
@@ -14,20 +18,26 @@ async def _safe_search(
     success_check: Callable = None,
     **kwargs,
 ) -> str:
-    """通用搜索包装器——统一异常处理和结果格式化。"""
+    """通用搜索包装器——统一异常处理和结果格式化。
+
+    异常一律打 warning 日志，避免静默失败掩盖根因。
+    """
     try:
         result = await search_fn(*args, **kwargs)
         if success_check:
             if success_check(result):
                 return f"[{label}]\n\n{result}"
+            logger.debug(f"{label}: 结果未通过 success_check，丢弃")
         elif result:
             return f"[{label}]\n\n{result}"
+        else:
+            logger.debug(f"{label}: 空结果")
     except asyncio.TimeoutError:
-        pass
-    except (TimeoutError, ConnectionError):
-        pass
-    except ImportError:
-        pass
+        logger.warning(f"{label} 超时")
+    except (TimeoutError, ConnectionError) as e:
+        logger.warning(f"{label} 网络错误: {e}")
+    except ImportError as e:
+        logger.warning(f"{label} 依赖缺失: {e}")
     except Exception as e:
         logger.warning(f"{label} failed: {e}")
     return ""
@@ -43,7 +53,7 @@ async def web_searcher_agent(query: str, user_id: str = "") -> str:
     async def _search_with_timeout(q: str) -> str:
         return await asyncio.wait_for(
             asyncio.to_thread(search_and_summarize, q, max_results=2),
-            timeout=6.0,
+            timeout=WEB_SEARCH_TIMEOUT_S,
         )
 
     return await _safe_search(_search_with_timeout, "联网搜索结果", query, success_check=_check)
@@ -57,7 +67,10 @@ async def memory_searcher_agent(query: str, user_id: str = "") -> str:
         if not _MEMORY_SYSTEM_AVAILABLE:
             return ""
         store = get_memory_store()
-        memories = await asyncio.wait_for(store.retrieve(q, top_k=5, user_id=uid), timeout=1.0)
+        memories = await asyncio.wait_for(
+            store.retrieve(q, top_k=5, user_id=uid),
+            timeout=MEMORY_SEARCH_TIMEOUT_S,
+        )
         if memories:
             return store.format_memories_for_prompt(memories) or ""
         return ""

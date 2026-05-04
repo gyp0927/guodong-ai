@@ -12,7 +12,14 @@ from cognition.types import ThinkingMode
 
 
 class AgentState(TypedDict):
-    """多Agent共享状态（加入认知状态）"""
+    """多Agent共享状态（加入认知状态）
+
+    NOTE: ``messages`` 用 LangGraph 默认的 ``add`` reducer(list concat)。
+    fast_graph 多个 searcher 通过 Send 并行写时,完成时序不确定;但每个 searcher
+    输出的 SystemMessage 已带 ``name``(search_web / search_memory / tool_caller),
+    ``_run_agent`` 在传给 LLM 前会把相邻具名 SystemMessage 按 name 排序,
+    保证 LLM 看到的上下文顺序确定可复现。
+    """
     messages: Annotated[Sequence[BaseMessage], add]
     active_agent: str | None
     task_context: dict | None
@@ -36,16 +43,6 @@ def _make_result_with_cognitive_state(state: AgentState, result: dict) -> dict:
     return result
 
 
-def route_from_coordinator(state: AgentState) -> str:
-    """Coordinator 条件路由。
-
-    所有模式都路由到 Researcher，由 Researcher 内部根据 mode 决定启用哪些搜索子 Agent。
-    Coordinator 的分析结果仍作为上下文传给 Researcher。
-    """
-    # 总是路由到 Researcher，确保搜索子 Agent 被执行
-    return "researcher"
-
-
 def create_multi_agent_graph(
     coordinator_agent,
     researcher_agent,
@@ -65,15 +62,9 @@ def create_multi_agent_graph(
     # 设置入口点
     workflow.set_entry_point("coordinator")
 
-    # coordinator -> researcher 或 responder
-    workflow.add_conditional_edges(
-        "coordinator",
-        route_from_coordinator,
-        {
-            "researcher": "researcher",
-            "responder": "responder"
-        }
-    )
+    # Coordinator 的分析结果作为上下文传给 Researcher，
+    # 由 Researcher 内部根据 mode 决定启用哪些搜索子 Agent。
+    workflow.add_edge("coordinator", "researcher")
 
     # researcher/responder -> reviewer 审查
     workflow.add_edge("researcher", "reviewer")
@@ -129,11 +120,7 @@ def create_coordination_graph(coordinator_agent, researcher_agent, tool_caller, 
 
     workflow.set_entry_point("coordinator")
 
-    workflow.add_conditional_edges(
-        "coordinator",
-        route_from_coordinator,
-        {"researcher": "researcher", "responder": "responder"}
-    )
+    workflow.add_edge("coordinator", "researcher")
 
     workflow.add_edge("researcher", "tool_caller")
     workflow.add_edge("tool_caller", "responder")
@@ -146,8 +133,14 @@ async def _search_node(
     state: AgentState,
     search_fn: callable,
     skip_key: str,
+    name: str = "",
 ) -> dict:
-    """通用搜索节点"""
+    """通用搜索节点。
+
+    Args:
+        name: 给输出的 SystemMessage 打上 name 标签,供 _run_agent 在传给 LLM
+              前按 name 排序,保证多个并行 searcher 结果顺序确定。
+    """
     query = state["messages"][-1].content
     intent = state.get("task_context", {}).get("intent_result")
     if intent and intent.get(skip_key):
@@ -157,9 +150,19 @@ async def _search_node(
     result = await search_fn(query, user_id)
     if result:
         from langchain_core.messages import SystemMessage
-        return _make_result_with_cognitive_state(state, {
-            "messages": [SystemMessage(content=result)]
-        })
+        # SystemMessage 必须显式指令"基于以上结果"，否则 LLM 会忽略检索文本回退到训练知识。
+        # 与 coordination 模式 researcher_node 的 wrapping 保持一致。
+        msg = SystemMessage(
+            content=(
+                f"{result}\n\n"
+                "请基于以上搜索结果生成最终回答，"
+                "涉及实时信息、最新数据、价格、天气等时效内容时，"
+                "优先以此处的搜索结果为准，而非你的训练知识。"
+            ),
+        )
+        if name:
+            msg.name = name
+        return _make_result_with_cognitive_state(state, {"messages": [msg]})
     return _make_result_with_cognitive_state(state, {"messages": []})
 
 
@@ -204,10 +207,10 @@ def create_fast_graph(web_searcher, memory_searcher, tool_caller, responder_agen
     """
 
     async def web_searcher_node(state: AgentState) -> dict:
-        return await _search_node(state, web_searcher, "skip_search")
+        return await _search_node(state, web_searcher, "skip_search", name="search_web")
 
     async def memory_searcher_node(state: AgentState) -> dict:
-        return await _search_node(state, memory_searcher, "skip_memory")
+        return await _search_node(state, memory_searcher, "skip_memory", name="search_memory")
 
     async def tool_caller_node(state: AgentState) -> dict:
         return await tool_caller(state)

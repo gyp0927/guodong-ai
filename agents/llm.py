@@ -92,6 +92,20 @@ def _build_llm_kwargs(sid: str = "") -> dict:
     return kwargs
 
 
+def get_llm_provider_model(sid: str = "") -> tuple[str, str]:
+    """返回某个 sid 实际使用的 (provider, model)。
+
+    Cache key 和 stats 上报必须用这个,而非 core.config.get_provider() —— 那是
+    全局 env 默认值,sid 切档/Web 端用户配置生效后会与实际不一致,导致 cache
+    命中错档的响应或 stats 把流量算到错的 provider 上。
+    """
+    from core.config import get_provider, get_model_name
+    cfg = _llm_configs.get(sid)
+    if cfg:
+        return cfg.get("provider", "ollama"), cfg.get("model", "")
+    return get_provider(), get_model_name()
+
+
 def _make_cache_key(kwargs: dict) -> str:
     """构建基于 JSON 的缓存键。"""
     return json.dumps(kwargs, sort_keys=True)

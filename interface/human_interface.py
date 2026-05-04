@@ -7,11 +7,12 @@ from graph.orchestrator import create_coordination_graph, create_fast_graph
 from state.manager import SessionManager
 from core.model_router import get_router
 from core.utils import detect_language
+from agents.llm import set_current_llm_config
 
 # 认知系统导入
 from cognition.human_mind import HumanMind
 from cognition.types import CognitiveState, ThinkingMode
-from cognition.utils import serialize_cognitive_state
+from cognition.utils import serialize_cognitive_state, get_cognitive_state_from_dict
 
 # Fast graph 需要的搜索和工具函数
 from agents.search import web_searcher_agent, memory_searcher_agent
@@ -61,12 +62,31 @@ class HumanInterface:
 
     async def send_message(self, content: str) -> str:
         """发送用户消息并获取响应（异步）"""
+        sid = self.messages.get_current_session_id()
+
         # 模型路由：分析复杂度并切换 LLM 配置
         router = get_router()
         history = self.messages.get_messages()
         history_turns = len(history) // 2
-        route_result = router.route(content, history_turns)
-        logger.info(f"Model routing: tier={route_result['tier']}, score={route_result['analysis']['score']}")
+        applied_routing = False
+        if router.enabled:
+            route_result = router.route(content, history_turns)
+            logger.info(
+                f"Model routing: tier={route_result['tier']}, "
+                f"score={route_result['analysis']['score']}"
+            )
+            # 仅在非 default 档位时覆写 LLM 配置（default 档让运行时回落到 .env）
+            if route_result["tier"] != "default":
+                tier_config = route_result["config"]
+                cfg = {k: v for k, v in {
+                    "provider": tier_config.get("provider"),
+                    "model": tier_config.get("model"),
+                    "apiKey": tier_config.get("apiKey", ""),
+                    "baseUrl": tier_config.get("baseUrl", ""),
+                }.items() if v}
+                if cfg:
+                    set_current_llm_config(cfg, sid=sid)
+                    applied_routing = True
 
         # 自动语言检测（仅第一条用户消息）
         if self.detected_language is None:
@@ -78,7 +98,11 @@ class HumanInterface:
         initial_state = {
             "messages": self.messages.get_messages_for_model(max_turns=10),
             "active_agent": None,
-            "task_context": {"user_input": content, "detected_language": self.detected_language},
+            "task_context": {
+                "user_input": content,
+                "detected_language": self.detected_language,
+                "sid": sid,
+            },
             "human_input_required": False,
             "base_model_response": None,
             "review_result": None,
@@ -88,11 +112,18 @@ class HumanInterface:
 
         logger.info(f"Sending message, graph_type={'fast' if self.fast_mode else 'coordination'}")
 
-        result = await self.graph.ainvoke(initial_state)
+        try:
+            result = await self.graph.ainvoke(initial_state)
+        finally:
+            if applied_routing:
+                set_current_llm_config(None, sid=sid)
 
         # 保存更新后的认知状态
         if result.get("cognitive_state"):
-            self.cognitive_state = CognitiveState(**result["cognitive_state"])
+            # 必须用 get_cognitive_state_from_dict 而不是 CognitiveState(**dict),
+            # 否则嵌套的 emotional/persona/thoughts 全部丢类型变成裸 dict,
+            # 下次调 to_prompt_text() 会 AttributeError。
+            self.cognitive_state = get_cognitive_state_from_dict(result)
             logger.info(f"认知状态已更新，当前turn={self.cognitive_state.turn_count}")
 
         # 将 agent 响应添加到消息管理器

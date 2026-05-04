@@ -2,7 +2,6 @@
 
 import asyncio
 import uuid
-import weakref
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,8 +31,9 @@ class RetrievalResult:
     topic_frequency: float
 
 
-# Keep references to fire-and-forget background tasks to prevent GC
-_background_tasks: weakref.WeakSet = weakref.WeakSet()
+# 强引用 set 持 fire-and-forget task,WeakSet 在调度前会被 GC 掉。
+# task 完成后 done_callback 自行清理。
+_background_tasks: set = set()
 
 
 class FrequencyRouter:
@@ -161,27 +161,35 @@ class FrequencyRouter:
                     logger.warning("cold_tier_retrieve_timeout", query=query_text[:50])
                     cold_results = []
         elif strategy == RoutingStrategy.BOTH:
-            # Query both tiers in parallel; cold tier has timeout
-            hot_task = self.hot_tier.retrieve(
-                query_embedding=query_embedding,
-                top_k=top_k,
-                filters=filters,
-            )
-            cold_task = asyncio.wait_for(
-                self.cold_tier.retrieve(
+            # Query both tiers in parallel; cold tier has timeout.
+            # 显式 create_task 避免 gather 抛 TimeoutError 后再 await 已消费的协程。
+            hot_task = asyncio.create_task(
+                self.hot_tier.retrieve(
                     query_embedding=query_embedding,
-                    top_k=min(top_k, _COLD_MAX_RESULTS),
+                    top_k=top_k,
                     filters=filters,
-                ),
-                timeout=_COLD_RETRIEVE_TIMEOUT,
+                )
             )
-            try:
-                hot_results, cold_results = await asyncio.gather(hot_task, cold_task)
-            except asyncio.TimeoutError:
-                # Cold tier timed out, use hot results only
-                hot_results = await hot_task
+            cold_task = asyncio.create_task(
+                asyncio.wait_for(
+                    self.cold_tier.retrieve(
+                        query_embedding=query_embedding,
+                        top_k=min(top_k, _COLD_MAX_RESULTS),
+                        filters=filters,
+                    ),
+                    timeout=_COLD_RETRIEVE_TIMEOUT,
+                )
+            )
+            results = await asyncio.gather(hot_task, cold_task, return_exceptions=True)
+            hot_results = results[0] if not isinstance(results[0], BaseException) else []
+            if isinstance(results[1], asyncio.TimeoutError):
                 cold_results = []
                 logger.warning("cold_tier_retrieve_timeout", query=query_text[:50])
+            elif isinstance(results[1], BaseException):
+                cold_results = []
+                logger.warning("cold_tier_retrieve_failed", error=str(results[1]))
+            else:
+                cold_results = results[1]
 
         # Merge and re-rank
         merged = self.ranker.merge_and_rank(
@@ -197,6 +205,7 @@ class FrequencyRouter:
             )
         )
         _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
 
         elapsed_ms = (time.time() - start_time) * 1000
 

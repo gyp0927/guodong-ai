@@ -247,25 +247,6 @@ def _context_classify(query: str, history: list[BaseMessage]) -> Optional[Intent
             source="context",
         )
 
-    # 2. 极短回复（≤4字）且有上下文 → 可能是追问
-    if len(q) <= 4 and len(history) >= 3:
-        # 检查上一条是不是 AI 的回答
-        last_ai_msg = None
-        for msg in reversed(history[:-1]):  # 排除当前消息
-            if getattr(msg, "type", None) == "ai":
-                last_ai_msg = msg
-                break
-        if last_ai_msg:
-            # 短回复大概率是追问或确认
-            return IntentResult(
-                IntentType.CLARIFY,
-                confidence=0.60,
-                skip_search=True,
-                skip_memory=True,
-                skip_knowledge=True,
-                source="context",
-            )
-
     return None
 
 

@@ -19,6 +19,7 @@ from core.i18n import LANG_NAMES, get_lang_instruction
 from flask import Flask, render_template, request, send_file
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
+from werkzeug.utils import secure_filename
 
 from agents.llm import (
     set_current_llm_config, set_streaming_callback,
@@ -56,8 +57,18 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.getenv("FLASK_SECRET_KEY", secrets.token_hex(32))
-CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+# 限制上传体积,防止磁盘被恶意大文件耗尽
+app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
+
+# CORS 与 SocketIO origin 白名单 - 默认 localhost,生产环境需通过 CORS_ORIGINS 显式开放
+_CORS_ORIGINS_ENV = os.getenv("CORS_ORIGINS", "http://localhost:5000,http://127.0.0.1:5000")
+_cors_origins = [o.strip() for o in _CORS_ORIGINS_ENV.split(",") if o.strip()] or ["http://localhost:5000"]
+CORS(app, origins=_cors_origins)
+socketio = SocketIO(app, cors_allowed_origins=_cors_origins, async_mode="threading")
+
+# 是否信任反向代理传来的 X-Forwarded-For / X-Real-Ip
+# 默认不信任(否则任何外部用户可伪造 127.0.0.1 绕过 LOCAL_ONLY 校验)
+TRUST_PROXY = os.getenv("TRUST_PROXY", "false").lower() in ("true", "1", "yes")
 
 # 生成的文件保存目录
 _GENERATED_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated_files")
@@ -146,6 +157,7 @@ def get_stats():
 
 
 @app.route("/api/rag/upload", methods=["POST"])
+@auth_required
 def upload_to_rag():
     """上传文件到知识库"""
     try:
@@ -158,8 +170,10 @@ def upload_to_rag():
 
         from core.document_parser import parse_document
 
-        temp_dir = tempfile.gettempdir()
-        file_path = os.path.join(temp_dir, file.filename)
+        # 必须用 secure_filename 防 ../ 与绝对路径(Windows 上 ..\..\Windows\Temp 同样危险)
+        safe_name = secure_filename(file.filename) or "upload.bin"
+        temp_dir = tempfile.mkdtemp(prefix="rag_")
+        file_path = os.path.join(temp_dir, safe_name)
         file.save(file_path)
 
         try:
@@ -172,14 +186,19 @@ def upload_to_rag():
                 "chunks": chunks,
             }
         finally:
-            if os.path.exists(file_path):
-                os.remove(file_path)
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                os.rmdir(temp_dir)
+            except OSError:
+                pass
     except Exception as e:
         logger.exception("RAG upload failed")
         return {"success": False, "message": f"上传失败: {str(e)}"}, 500
 
 
 @app.route("/api/rag/clear", methods=["POST"])
+@auth_required
 def clear_rag_api():
     """清空知识库"""
     try:
@@ -208,6 +227,7 @@ def get_rag_documents():
 
 
 @app.route("/api/rag/documents/<path:source>", methods=["DELETE"])
+@auth_required
 def delete_rag_document(source):
     """删除指定来源的文档"""
     try:
@@ -221,8 +241,9 @@ def delete_rag_document(source):
 
 
 @app.route("/api/execute", methods=["POST"])
+@auth_required
 def execute_code_api():
-    """执行 Python 代码（HTTP API）"""
+    """执行 Python 代码（HTTP API） — 仅认证用户可调用"""
     try:
         data = request.get_json() or {}
         code = data.get("code", "")
@@ -242,14 +263,18 @@ def execute_code_api():
 
 
 def _get_real_remote_addr():
-    """获取真实的客户端 IP，考虑反向代理。"""
-    # X-Forwarded-For 格式: client, proxy1, proxy2
-    forwarded = request.headers.get("X-Forwarded-For", "")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    real_ip = request.headers.get("X-Real-Ip", "")
-    if real_ip:
-        return real_ip
+    """获取真实的客户端 IP。
+
+    仅在 TRUST_PROXY=true 时才接受 X-Forwarded-For / X-Real-Ip,
+    否则返回直连地址 — 不然任何外部客户端可伪造 127.0.0.1 绕过 LOCAL_ONLY。
+    """
+    if TRUST_PROXY:
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        real_ip = request.headers.get("X-Real-Ip", "")
+        if real_ip:
+            return real_ip
     return request.remote_addr
 
 
@@ -299,6 +324,20 @@ class SocketState:
         if self.user_id != user_id:
             self.user_id = user_id
             self.msg_manager = SessionManager(user_id=user_id)
+
+    def reset_session(self):
+        """切/新/删会话时重置 per-socket 瞬态字段。
+
+        否则 detected_language/current_plan/plan_results 会从前一会话沿用,
+        流式回调也可能继续把 token_chunk 打到新会话。
+        """
+        set_stop(self.sid)
+        clear_streaming_callback(self.sid)
+        self.current_base_response = None
+        self.detected_language = None
+        self.current_plan = None
+        self.current_step_index = 0
+        self.plan_results = {}
 
 
 # 按 socket sid 存储的隔离状态
@@ -371,27 +410,49 @@ def start_socket_cleanup():
         logger.info("Socket cleanup timer started")
 
 
+_init_lock = threading.Lock()
+_agents_initialized = False
+
+
 def init_agents():
-    """预编译所有图结构，并初始化记忆系统。"""
-    global coordination_graph, fast_graph
+    """预编译所有图结构,并初始化记忆系统。
 
-    # 始终编译两种图，运行时根据 socket 的 fast_mode 选择
-    coordinator, researcher, responder, reviewer = create_agents(language="zh", fast_mode=False)
-    coordination_graph = create_coordination_graph(coordinator, researcher, tool_caller_node, responder)
-    # 快速模式：并行 WebSearcher + MemorySearcher + ToolCaller → Responder
-    fast_graph = create_fast_graph(web_searcher_agent, memory_searcher_agent, tool_caller_node, responder)
+    幂等:首次调用做完整初始化,后续调用直接返回。
+    Graph 是无状态的(运行时通过 sid 取 LLM 配置),memory store 自带
+    `_initialized` 守卫;重复 init 等于浪费 30s embedder 预热。
+    """
+    global coordination_graph, fast_graph, _agents_initialized
 
-    logger.info("Agent graphs initialized")
+    # double-checked: 已初始化时跳过 lock,避免每次连接都进 contended path
+    if _agents_initialized:
+        return
 
-    # 初始化记忆系统（如果可用）
-    if _MEMORY_SYSTEM_AVAILABLE:
-        try:
-            run_async_in_thread(get_memory_store().initialize())
-            logger.info("Memory system initialized")
-        except Exception as e:
-            logger.warning(f"Memory system initialization failed: {e}")
-    else:
-        logger.info("Memory system not available (dependencies missing)")
+    with _init_lock:
+        if _agents_initialized:
+            return
+
+        # 始终编译两种图，运行时根据 socket 的 fast_mode 选择
+        coordinator, researcher, responder, reviewer = create_agents(language="zh", fast_mode=False)
+        coordination_graph = create_coordination_graph(coordinator, researcher, tool_caller_node, responder)
+        # 快速模式：并行 WebSearcher + MemorySearcher + ToolCaller → Responder
+        fast_graph = create_fast_graph(web_searcher_agent, memory_searcher_agent, tool_caller_node, responder)
+
+        logger.info("Agent graphs initialized")
+
+        # 初始化记忆系统(后台 fire-and-forget,sentence-transformers 首次加载~10-15s,
+        # 不阻塞 init_agents 返回。第一次 search/save 调用时若未就绪会自动 await initialize)
+        if _MEMORY_SYSTEM_AVAILABLE:
+            def _bg_memory_init():
+                try:
+                    asyncio.run(get_memory_store().initialize())
+                    logger.info("Memory system initialized")
+                except Exception as e:
+                    logger.warning(f"Memory system initialization failed: {e}")
+            threading.Thread(target=_bg_memory_init, name="memory-warmup", daemon=True).start()
+        else:
+            logger.info("Memory system not available (dependencies missing)")
+
+        _agents_initialized = True
 
 
 # 常见的 API Key 占位符/默认值，视为无效配置
@@ -957,8 +1018,7 @@ async def _async_handle_review(sid: str, expected_session_id: str):
 
 def _create_new_session(sid: str, state):
     """新建会话的通用逻辑"""
-    set_stop(sid)
-    state.current_base_response = None
+    state.reset_session()
     session_id = state.msg_manager.new_session("新对话")
     emit("session_created", {
         "session_id": session_id,
@@ -985,10 +1045,9 @@ def handle_switch_session(data):
     """切换会话"""
     sid = request.sid
     state = get_socket_state(sid)
-    set_stop(sid)
     session_id = data.get("session_id", "")
     if state.msg_manager.switch_session(session_id):
-        state.current_base_response = None
+        state.reset_session()
         emit("session_switched", {
             "session_id": session_id,
             "sessions": state.msg_manager.list_sessions()
@@ -1004,10 +1063,10 @@ def handle_delete_session(data):
     sid = request.sid
     state = get_socket_state(sid)
     session_id = data.get("session_id", "")
-    if session_id == state.msg_manager.get_current_session_id():
-        set_stop(sid)
+    is_current = session_id == state.msg_manager.get_current_session_id()
     if state.msg_manager.delete_session(session_id):
-        state.current_base_response = None
+        if is_current:
+            state.reset_session()
         emit("session_deleted", {
             "session_id": session_id,
             "sessions": state.msg_manager.list_sessions()
@@ -1285,51 +1344,6 @@ def handle_set_user_config(data):
         "model": model,
         "name": name or f"{PROVIDER_NAMES.get(provider, provider)} · {model}"
     })
-
-
-@socketio.on("execute_code")
-def handle_execute_code(data):
-    """执行 Python 代码"""
-    code = data.get("code", "")
-    if not code:
-        emit("code_result", {"success": False, "error": "代码为空"})
-        return
-
-    try:
-        from tools.code_executor import execute_python, format_result
-        result = execute_python(code, timeout=data.get("timeout", 30))
-        emit("code_result", {
-            "success": result["success"],
-            "stdout": result.get("stdout", ""),
-            "stderr": result.get("stderr", ""),
-            "error": result.get("error", ""),
-            "duration_ms": result.get("duration_ms", 0),
-            "formatted": format_result(result),
-        })
-    except Exception as e:
-        logger.exception("Code execution failed")
-        emit("code_result", {"success": False, "error": str(e)})
-
-
-@socketio.on("web_search")
-def handle_web_search(data):
-    """联网搜索"""
-    query = data.get("query", "")
-    if not query:
-        emit("search_result", {"success": False, "error": "查询为空"})
-        return
-
-    try:
-        from tools.search import search_and_summarize
-        result = search_and_summarize(query, max_results=data.get("max_results", 3))
-        emit("search_result", {
-            "success": True,
-            "query": query,
-            "result": result,
-        })
-    except Exception as e:
-        logger.exception("Web search failed")
-        emit("search_result", {"success": False, "error": str(e)})
 
 
 @socketio.on("confirm_plan")

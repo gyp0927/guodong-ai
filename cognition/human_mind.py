@@ -64,8 +64,12 @@ class HumanMind:
         base_prompt: str,
         query: str,
         cognitive_state: Optional[CognitiveState] = None,
+        sid: str = "",
     ) -> tuple[str, bool]:
         """增强系统提示词，注入人类思维元素
+
+        Args:
+            sid: socket/会话 ID,用于隔离多用户的情感状态。留空退化为单用户。
 
         Returns:
             (增强后的提示词, 是否启用了内心独白格式)
@@ -82,9 +86,9 @@ class HumanMind:
             # 将人格提示词插入到开头（替换掉基础提示词中的身份定义）
             enhanced = self._merge_persona_into_prompt(enhanced, persona_prompt)
 
-        # 2. 注入情感状态
+        # 2. 注入情感状态(按 sid 隔离)
         if self.enable_emotion:
-            enhanced = inject_emotion_to_prompt(agent_name, enhanced)
+            enhanced = inject_emotion_to_prompt(agent_name, enhanced, sid=sid)
 
         # 3. 注入直觉提示
         if self.enable_intuition:
@@ -118,8 +122,12 @@ class HumanMind:
         raw_response: str,
         cognitive_state: Optional[CognitiveState] = None,
         had_monologue: bool = False,
+        sid: str = "",
     ) -> str:
         """处理原始响应，应用人类思维后处理
+
+        Args:
+            sid: socket/会话 ID,情感状态按 (sid, agent_name) 隔离。
 
         - 提取内心独白
         - 元认知分析
@@ -130,6 +138,7 @@ class HumanMind:
             cognitive_state = CognitiveState()
 
         response = raw_response
+        meta_result = None  # 元认知未启用 / 非 responder 时保持 None,后续 success 计算用 None 兜底
 
         # 1. 提取内心独白（如果启用了的话）
         if had_monologue and self.enable_monologue:
@@ -166,12 +175,12 @@ class HumanMind:
                     mode=ThinkingMode.REFLECTIVE,
                 )
 
-        # 3. 更新情感状态
+        # 3. 更新情感状态(按 sid 隔离)
         if self.enable_emotion:
-            success = not (meta_result.should_rethink if self.enable_metacognition else False)
+            success = not meta_result.should_rethink if meta_result is not None else True
             complexity = len(response) / 1000  # 简单用长度估算
             self.emotion.update_after_interaction(
-                agent_name, success=success, complexity=min(1.0, complexity)
+                agent_name, success=success, complexity=min(1.0, complexity), sid=sid,
             )
 
         # 4. 增加回合计数
@@ -209,10 +218,11 @@ def enhance_agent_prompt(
     base_prompt: str,
     query: str = "",
     cognitive_state: Optional[CognitiveState] = None,
+    sid: str = "",
 ) -> tuple[str, bool]:
     """便捷函数：增强agent提示词"""
     mind = HumanMind()
-    return mind.enhance_prompt(agent_name, base_prompt, query, cognitive_state)
+    return mind.enhance_prompt(agent_name, base_prompt, query, cognitive_state, sid=sid)
 
 
 def process_agent_response(
@@ -221,7 +231,8 @@ def process_agent_response(
     raw_response: str,
     cognitive_state: Optional[CognitiveState] = None,
     had_monologue: bool = False,
+    sid: str = "",
 ) -> str:
     """便捷函数：处理agent响应"""
     mind = HumanMind()
-    return mind.process_response(agent_name, query, raw_response, cognitive_state, had_monologue)
+    return mind.process_response(agent_name, query, raw_response, cognitive_state, had_monologue, sid=sid)

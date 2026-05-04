@@ -1,11 +1,11 @@
 """认知引擎 - 合并5个"人类思维"子系统。
 
 包含：
-1. EmotionalStateManager - 情感状态
+1. EmotionalStateManager - 情感状态(按 (sid, agent_name) 双键索引,多用户安全)
 2. InnerMonologueEngine - 内心独白
 3. IntuitionEngine - 直觉引擎
 4. MetacognitionEngine - 元认知
-5. PersonaManager - 人格系统
+5. PersonaManager - 人格系统(只读 agent 类型 → persona 映射,所有用户共享)
 """
 
 import logging
@@ -25,25 +25,35 @@ logger = logging.getLogger(__name__)
 # ========================================================================
 
 class EmotionalStateManager:
-    """管理所有Agent的情感状态"""
+    """管理所有Agent的情感状态。
+
+    存储按 ``(sid, agent_name)`` 双键索引,避免多用户(同一进程多 SocketIO 客户端)
+    互相覆盖情感。sid 留空时退化为单用户(向后兼容控制台/单用户场景)。
+    """
 
     def __init__(self):
-        self._states: dict[str, EmotionalState] = {}
+        self._states: dict[tuple[str, str], EmotionalState] = {}
 
-    def get_state(self, agent_name: str) -> EmotionalState:
-        if agent_name not in self._states:
-            self._states[agent_name] = EmotionalState()
-        return self._states[agent_name]
+    def get_state(self, agent_name: str, sid: str = "") -> EmotionalState:
+        key = (sid or "", agent_name)
+        if key not in self._states:
+            self._states[key] = EmotionalState()
+        return self._states[key]
 
     def update_after_interaction(
         self, agent_name: str, success: bool = True, complexity: float = 0.5,
         user_emotion_hint: Optional[str] = None,
+        sid: str = "",
     ) -> EmotionalState:
-        state = self.get_state(agent_name)
+        state = self.get_state(agent_name, sid=sid)
         state.update("success" if success else "failure", complexity)
         if user_emotion_hint:
             self._respond_to_user_emotion(state, user_emotion_hint)
         return state
+
+    def reset(self, sid: str) -> None:
+        """会话结束/切换时清掉这个 sid 的所有 agent 情感状态。"""
+        self._states = {k: v for k, v in self._states.items() if k[0] != (sid or "")}
 
     def _respond_to_user_emotion(self, state: EmotionalState, hint: str) -> None:
         hint = hint.lower()
@@ -447,8 +457,8 @@ def get_emotional_manager() -> EmotionalStateManager:
     return _get_instance("emotional", EmotionalStateManager)
 
 
-def inject_emotion_to_prompt(agent_name: str, base_prompt: str) -> str:
-    state = get_emotional_manager().get_state(agent_name)
+def inject_emotion_to_prompt(agent_name: str, base_prompt: str, sid: str = "") -> str:
+    state = get_emotional_manager().get_state(agent_name, sid=sid)
     return f"{state.to_prompt_text()}\n\n{base_prompt}"
 
 

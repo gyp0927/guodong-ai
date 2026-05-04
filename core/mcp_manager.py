@@ -17,6 +17,33 @@ _CONFIG_PATH = os.path.join(
     "state", "mcp_servers.json"
 )
 
+# 通过环境变量限制 stdio MCP 可启动的命令(防 add_server 任意命令注入)
+# 不设置时为空 -> 允许所有(向后兼容);生产建议设为如 "npx,uvx,python"
+_MCP_ALLOWED = {
+    c.strip() for c in os.getenv("MCP_ALLOWED_COMMANDS", "").split(",") if c.strip()
+}
+
+# 透传给 MCP 子进程的最小环境变量集合 — 不含项目 API Key
+# 防止恶意/失误的 MCP 拿到所有凭据
+_MCP_ENV_PASSTHROUGH = {
+    "PATH", "LANG", "LC_ALL", "LC_CTYPE",
+    "USERPROFILE", "USERNAME", "HOMEPATH", "HOMEDRIVE",  # Windows
+    "HOME", "USER", "TMPDIR", "TEMP", "TMP",
+    "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT",  # Windows 必需
+}
+
+
+def _build_mcp_env(extra: dict | None) -> dict:
+    """为 MCP 子进程构造受限的环境变量。
+
+    只透传上面白名单里的 + 用户在 mcp_servers.json 显式配置的 env。
+    不再无条件继承宿主全部 env(里面可能有 OPENAI_API_KEY 等)。
+    """
+    base = {k: v for k, v in os.environ.items() if k in _MCP_ENV_PASSTHROUGH}
+    if extra:
+        base.update(extra)
+    return base
+
 
 def _load_config() -> dict:
     """加载 MCP 服务器配置"""
@@ -76,6 +103,13 @@ class MCPManager:
     def add_server(self, name: str, command: str = "", args: list = None,
                    env: dict = None, url: str = "", transport: str = "stdio") -> bool:
         """添加/更新服务器配置"""
+        # 命令白名单校验:防止远程攻击者(在 LOCAL_ONLY 误绕过等场景下)注入任意 shell 命令
+        if transport == "stdio" and command and _MCP_ALLOWED:
+            cmd_basename = os.path.basename(command).lower()
+            if cmd_basename not in _MCP_ALLOWED and command not in _MCP_ALLOWED:
+                raise ValueError(
+                    f"命令 '{command}' 不在 MCP_ALLOWED_COMMANDS 白名单中"
+                )
         self._servers[name] = {
             "transport": transport,
             "command": command,
@@ -174,7 +208,7 @@ class MCPManager:
                 params = StdioServerParameters(
                     command=cfg.get("command", ""),
                     args=cfg.get("args", []),
-                    env={**os.environ, **cfg.get("env", {})},
+                    env=_build_mcp_env(cfg.get("env", {})),
                 )
                 async with stdio_client(params) as (read, write):
                     async with ClientSession(read, write) as session:
@@ -209,7 +243,7 @@ class MCPManager:
                 params = StdioServerParameters(
                     command=cfg.get("command", ""),
                     args=cfg.get("args", []),
-                    env={**os.environ, **cfg.get("env", {})},
+                    env=_build_mcp_env(cfg.get("env", {})),
                 )
                 async with stdio_client(params) as (read, write):
                     async with ClientSession(read, write) as session:

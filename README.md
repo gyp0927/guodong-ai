@@ -15,7 +15,7 @@
 | 🤖 多 Agent 协作 | Coordinator → Researcher → Responder → Reviewer 智能协作流程 |
 | 🌐 多模型支持 | 支持 20+ 家国内外 LLM 厂商（OpenAI 兼容 API） |
 | 📚 RAG 知识库 | 基于 Embedding 的文档检索（支持 PDF / Word / 文本） |
-| 🔍 联网搜索 | 集成 DuckDuckGo 实时搜索 |
+| 🔍 联网搜索 | 多源搜索:中文 query 优先 360,英文优先 DuckDuckGo,Bing 兜底 |
 | 🐍 代码执行 | Python 代码沙箱（AST 安全检查） |
 | 💬 多会话管理 | 多会话切换、SQLite 持久化存储 |
 | 📤 记录导出 | Markdown / JSON / HTML / PDF 格式 |
@@ -73,6 +73,16 @@ METADATA_DB_URL=sqlite+aiosqlite:///./data/adaptive_memory.db
 ```
 
 支持提供商：OpenAI、Anthropic、Google Gemini、DeepSeek、阿里通义千问、月之暗面 Kimi、智谱 GLM、xAI Grok、Mistral、Groq、Azure OpenAI、Ollama（本地）等。
+
+#### 安全相关 env(可选)
+
+```env
+ENABLE_AUTH=false                                  # 设 true 后 RAG/execute/plugin 端点要 X-API-Key
+TRUST_PROXY=false                                  # 反代后置时设 true,否则任何客户端可伪造 127.0.0.1 绕 LOCAL_ONLY
+CORS_ORIGINS=http://localhost:5000,http://127.0.0.1:5000
+MAX_UPLOAD_BYTES=52428800                          # 50MB 上传上限
+MCP_ALLOWED_COMMANDS=                              # 留空=允许任意,生产建议 "npx,uvx,python"
+```
 
 ### 启动
 
@@ -227,7 +237,7 @@ jelly-ai/
 
 ### 联网搜索
 
-输入框上方点击"联网"按钮开启 DuckDuckGo 实时搜索。
+聊天时根据意图自动触发(查询含"什么是 / 为什么 / 介绍 / 最新 / 价格 / 天气"等事实/时效关键词时启用)。中文查询优先走 360 搜索,英文优先 DuckDuckGo,Bing 作为 fallback。无需手动开关。
 
 ### 代码执行
 

@@ -23,6 +23,9 @@ _FETCH_TIMEOUT = 8
 _MAX_FETCH_WORKERS = 3
 _MAX_RETRIES = 2
 
+# CJK Unified Ideographs (U+4E00–U+9FFF)，用于判断 query 是否含中文
+_CJK_RE = re.compile(r"[一-鿿]")
+
 # ========== HTTP 客户端（使用 requests）==========
 
 try:
@@ -241,20 +244,28 @@ def duckduckgo_search(query: str, max_results: int = 2) -> list[dict]:
     """搜索入口，带多源 fallback 和重试。
 
     搜索优先级：
-    1. duckduckgo-search 库（最稳定）
-    2. 360 搜索（国内无需代理）
-    3. Bing 搜索（fallback）
+    - 中文 query：360 → Bing → DDG（DDG 对中文时事查询常返回垃圾/无关结果）
+    - 英文 query：DDG → 360 → Bing
     """
     cached = _get_cached_search(query)
     if cached is not None:
         return cached
 
+    has_chinese = bool(_CJK_RE.search(query))
+    if has_chinese:
+        sources = [
+            ("360_search", _so_search),
+            ("bing", _bing_search),
+            ("ddg_library", _try_ddg_library),
+        ]
+    else:
+        sources = [
+            ("ddg_library", _try_ddg_library),
+            ("360_search", _so_search),
+            ("bing", _bing_search),
+        ]
+
     last_error = None
-    sources = [
-        ("ddg_library", _try_ddg_library),
-        ("360_search", _so_search),
-        ("bing", _bing_search),
-    ]
 
     for source_name, source_fn in sources:
         for attempt in range(_MAX_RETRIES):

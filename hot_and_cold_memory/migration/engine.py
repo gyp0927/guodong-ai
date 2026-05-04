@@ -1,9 +1,16 @@
-"""Tier migration engine."""
+"""Tier migration engine.
+
+WARNING — schema drift on cold/hot 迁移路径 (TODO):
+访问 ``record.document_id`` / 调用 ``store_chunks``、``decompression_engine`` 等
+都已不存在于当前 dataclass/方法上。仅在 hot tier 超容触发 evict_coldest 时被踩,
+数据量小时不进。要修就连同 schema 一起重整,别单独打补丁。
+"""
 
 import asyncio
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 from hot_and_cold_memory.core.config import Tier, get_settings
 from hot_and_cold_memory.core.exceptions import ChunkNotFoundError, MigrationError
@@ -219,8 +226,7 @@ class MigrationEngine:
             memories_for_llm = [
                 MemoryEntry(
                     memory_id=record.memory_id,
-                    document_id=record.document_id,
-                    text=record.content,
+                    content=record.content,
                     tags=record.metadata.get("tags", []) if record.metadata else [],
                 )
                 for _, record in group
@@ -274,28 +280,29 @@ class MigrationEngine:
                 vectors=[summary_embedding],
                 payloads=[{
                     "chunk_id": str(record.memory_id),
-                    "document_id": str(record.document_id),
                     "tier": Tier.COLD.value,
                     "tags": record.metadata.get("tags", []) if record.metadata else [],
                     "compressed": True,
                 }],
             )
 
-            # 4. Recreate metadata in cold tier
+            # 4. Recreate metadata in cold tier。
+            # MemoryItem 没有 document_id / compressed_length 字段(schema drift),
+            # compressed_length 塞进 attributes 保留信息。
             from hot_and_cold_memory.storage.metadata_store.base import MemoryItem
             now = datetime.utcnow()
             await self.metadata_store.create_memory(MemoryItem(
                 memory_id=record.memory_id,
-                document_id=record.document_id,
                 tier=Tier.COLD,
+                content=compressed.summary_text,
                 original_length=len(record.content),
-                compressed_length=len(compressed.summary_text),
                 access_count=record.access_count,
                 frequency_score=record.frequency_score,
                 created_at=now,
                 updated_at=now,
                 last_migrated_at=now,
                 tags=record.metadata.get("tags", []) if record.metadata else [],
+                attributes={"compressed_length": len(compressed.summary_text)},
             ))
 
             # 5. Remove from hot tier
@@ -374,7 +381,10 @@ class MigrationEngine:
             # 5. Get compressed info
             meta = await self.metadata_store.get_memory(memory_id)
             original_size = len(memory.content)
-            new_size = meta.compressed_length if meta else original_size
+            new_size = (
+                (meta.attributes.get("compressed_length") if meta and meta.attributes else None)
+                or original_size
+            )
             ratio = new_size / original_size if original_size > 0 else 1.0
 
             # 6. Log migration
@@ -434,7 +444,7 @@ class MigrationEngine:
 
         # Lowest frequency_score first - already ordered by the query
         evict_count = max(1, int(len(candidates) * percent))
-        ids_to_evict = [c.chunk_id for c in candidates[:evict_count]]
+        ids_to_evict = [c.memory_id for c in candidates[:evict_count]]
 
         logger.warning(
             "hot_tier_eviction_triggered",
@@ -534,7 +544,7 @@ class MigrationEngine:
             max_score=self.policy.thresholds.hot_to_cold,
             limit=self.policy.thresholds.batch_size,
         )
-        return [c.chunk_id for c in chunks]
+        return [c.memory_id for c in chunks]
 
     async def _identify_cold_to_hot_candidates(self) -> list[uuid.UUID]:
         """Identify cold chunks with high frequency or access count for promotion.
@@ -560,11 +570,11 @@ class MigrationEngine:
 
         candidates: dict[uuid.UUID, Any] = {}
         for c in high_score:
-            candidates[c.chunk_id] = c
+            candidates[c.memory_id] = c
         for c in medium_score:
-            if c.chunk_id not in candidates and self.policy.should_promote(
+            if c.memory_id not in candidates and self.policy.should_promote(
                 c.frequency_score, c.access_count
             ):
-                candidates[c.chunk_id] = c
+                candidates[c.memory_id] = c
 
         return list(candidates.keys())[: self.policy.thresholds.batch_size]

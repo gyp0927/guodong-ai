@@ -3,6 +3,8 @@
 import json
 import logging
 import re
+import time
+import asyncio
 from dataclasses import asdict
 from typing import Optional, Callable
 
@@ -12,9 +14,10 @@ from langchain_core.tools import BaseTool
 from core.cache import get_cache
 from core.plugin_system import get_plugins_prompt
 from agents.prompts import COORDINATOR_PROMPT, get_reviewer_prompt, build_responder_prompt, PLANNER_PROMPT
-from agents.llm import get_llm, get_streaming_callback
+from agents.llm import get_llm, get_streaming_callback, get_llm_provider_model
 from agents.search import run_parallel_search
 from state.stop_flag import is_stopped
+from state.stats import record_call, estimate_cost, CallRecord
 
 from cognition.human_mind import HumanMind
 from cognition.types import CognitiveState
@@ -22,6 +25,88 @@ from cognition.utils import get_cognitive_state_from_dict, save_cognitive_state_
 from cognition.tool_engine import run_tool_loop
 
 logger = logging.getLogger(__name__)
+
+
+# 后台 fire-and-forget 任务集合,持强引用避免被 GC
+_bg_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_bg(coro) -> None:
+    """把一个 awaitable 扔后台跑,不阻塞主流程。
+
+    用于 stats.db / cache.db 等同步 SQLite 写——这些不需要等结果,
+    阻塞每次 LLM 调用 ~30ms 不值得。无事件循环时做同步 fallback。
+    """
+    try:
+        task = asyncio.create_task(coro)
+        _bg_tasks.add(task)
+        task.add_done_callback(_bg_tasks.discard)
+    except RuntimeError:
+        try:
+            asyncio.get_event_loop().run_until_complete(coro)
+        except Exception as e:
+            logger.debug(f"bg task fallback failed: {e}")
+
+
+def _estimate_tokens(text: str) -> int:
+    """char/4 粗估,流式 API 拿不到精确 token 计数时用。"""
+    return max(1, len(text) // 4)
+
+
+def _normalize_message_order(messages: list) -> list:
+    """把相邻具名 SystemMessage 按 name 排序,保证多个并行 searcher 结果顺序确定。
+
+    LangGraph 的 add reducer 按 task 完成时序拼 messages,fast_graph 三个 searcher
+    并行 Send 时位置不固定。这里在传给 LLM 之前 stable sort,不破坏
+    Human/AI 历史交错(只动连续的具名 SystemMessage 段)。
+    """
+    out = []
+    buffer = []
+    for msg in messages:
+        if isinstance(msg, SystemMessage) and getattr(msg, "name", None):
+            buffer.append(msg)
+        else:
+            if buffer:
+                buffer.sort(key=lambda m: m.name or "")
+                out.extend(buffer)
+                buffer = []
+            out.append(msg)
+    if buffer:
+        buffer.sort(key=lambda m: m.name or "")
+        out.extend(buffer)
+    return out
+
+
+def _record_llm_call(
+    agent_name: str,
+    sid: str | None,
+    messages: list,
+    response: str,
+    duration_ms: int,
+    status: str = "success",
+) -> None:
+    """把一次 LLM 调用打到 stats.db。失败仅警告,不影响主流程。"""
+    try:
+        provider, model = get_llm_provider_model(sid or "")
+        prompt_tokens = sum(_estimate_tokens(getattr(m, "content", "") or "") for m in messages)
+        completion_tokens = _estimate_tokens(response)
+        total = prompt_tokens + completion_tokens
+        cost = estimate_cost(provider, prompt_tokens, completion_tokens)
+        record_call(CallRecord(
+            timestamp=time.time(),
+            provider=provider,
+            model=model,
+            agent_name=agent_name,
+            session_id=sid or "",
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total,
+            duration_ms=duration_ms,
+            estimated_cost_usd=cost,
+            status=status,
+        ))
+    except Exception as e:
+        logger.debug(f"stats record failed: {e}")
 
 
 def _build_result_dict(
@@ -66,17 +151,19 @@ async def _run_agent(
     had_monologue = False
     if mind and enable_cognition:
         enhanced_prompt, had_monologue = mind.enhance_prompt(
-            agent_name, system_prompt, query, cognitive_state
+            agent_name, system_prompt, query, cognitive_state, sid=sid or "",
         )
 
     llm = get_llm(sid or "")
-    messages = [SystemMessage(content=enhanced_prompt)] + list(state["messages"])
+    # 将历史 + 搜索结果合并;_normalize_message_order 把并行 searcher 写入的
+    # 具名 SystemMessage 按 name 排序,保证 LLM 看到的上下文顺序确定。
+    messages = [SystemMessage(content=enhanced_prompt)] + _normalize_message_order(list(state["messages"]))
 
     # 缓存
     cache_enabled = agent_name in ("responder", "coordinator")
     cache = get_cache() if cache_enabled else None
-    from core.config import get_provider, get_model_name
-    cache_key = (get_provider(), get_model_name())
+    # cache key 必须用 sid-bound 的 provider/model,否则切档后会命中错档 cache
+    cache_key = get_llm_provider_model(sid or "")
 
     if cache and cache_enabled:
         try:
@@ -96,6 +183,7 @@ async def _run_agent(
     if agent_name == "coordinator":
         llm = llm.bind(max_tokens=80)
 
+    _llm_t0 = time.time()
     if tools:
         stream_cb = on_token if on_token else get_streaming_callback(sid)
         response = await run_tool_loop(llm, messages, tools, max_iterations=3, sid=sid or "", on_token=stream_cb)
@@ -125,16 +213,30 @@ async def _run_agent(
                             if stream_cb:
                                 stream_cb(chunk.content)
             else:
+                _spawn_bg(asyncio.to_thread(
+                    _record_llm_call, agent_name, sid, messages, response,
+                    int((time.time() - _llm_t0) * 1000), "error",
+                ))
                 raise
 
-    if cache and cache_enabled and response:
-        try:
-            cache.set(messages, cache_key[0], cache_key[1], response)
-        except (OSError, ValueError) as e:
-            logger.warning(f"Cache write failed: {e}")
+    _llm_duration_ms = int((time.time() - _llm_t0) * 1000)
+    _llm_status = "stopped" if is_stopped(sid) else "success"
+    _spawn_bg(asyncio.to_thread(
+        _record_llm_call, agent_name, sid, messages, response, _llm_duration_ms, _llm_status,
+    ))
+
+    if cache and cache_enabled and response and not is_stopped(sid):
+        def _cache_write():
+            try:
+                cache.set(messages, cache_key[0], cache_key[1], response)
+            except (OSError, ValueError) as e:
+                logger.warning(f"Cache write failed: {e}")
+        _spawn_bg(asyncio.to_thread(_cache_write))
 
     if mind and enable_cognition:
-        response = mind.process_response(agent_name, query, response, cognitive_state, had_monologue)
+        response = mind.process_response(
+            agent_name, query, response, cognitive_state, had_monologue, sid=sid or "",
+        )
         save_cognitive_state_to_dict(state, cognitive_state)
 
     # 避免返回空的 assistant 消息（会导致 API 400 错误）
@@ -150,7 +252,11 @@ async def coordinator_node(state: dict, sid: str | None = None) -> dict:
 
 
 async def researcher_node(state: dict, sid: str | None = None) -> dict:
-    """研究员 Agent - 仅并行搜索并整合结果。"""
+    """搜索聚合节点 - 并行执行 web/memory/knowledge 搜索并把结果注入上下文。
+
+    注意：此节点不调用 LLM，也不走 _run_agent。它只是 run_parallel_search
+    的薄包装，把搜索文本以 SystemMessage 的形式塞进 state，供下游 Responder 使用。
+    """
     search_context = await run_parallel_search(state)
     if search_context:
         return {"messages": [SystemMessage(

@@ -19,16 +19,30 @@ _FORBIDDEN_MODULES = {
     "os", "sys", "subprocess", "importlib", "ctypes", "socket",
     "urllib", "http", "ftplib", "smtplib", "pickle", "marshal",
     "compileall", "py_compile", "bdb", "pdb", "trace",
+    "shutil", "pathlib", "tempfile", "multiprocessing",
+    "builtins",  # 防 import builtins 拿 __import__
 }
 
 # 禁止在代码中使用的危险函数/方法名（全局禁止 + 模块级禁止）
 _FORBIDDEN_CALLS_GLOBAL = {
     "eval", "exec", "compile", "open", "input", "__import__",
     "system", "popen", "call", "run", "exec_",
+    "getattr", "setattr", "delattr",  # 动态属性
+    "globals", "locals", "vars",       # 命名空间内省
 }
 # 以下函数名被导入到当前作用域时也禁止（如 from importlib import import_module）
 _FORBIDDEN_CALLS_ALIASED = {
-    "import_module", "find_loader",  # importlib
+    "import_module", "find_loader", "spec_from_file_location",  # importlib
+}
+
+# 禁止访问的 dunder 属性 — 经典逃逸链 (().__class__.__base__.__subclasses__())
+_FORBIDDEN_ATTRS = {
+    "__class__", "__bases__", "__base__", "__subclasses__",
+    "__mro__", "__globals__", "__builtins__", "__import__",
+    "__getattribute__", "__dict__", "__init_subclass__",
+    "__loader__", "__spec__", "__code__", "__closure__",
+    "f_globals", "f_locals", "f_back",  # frame inspection
+    "func_globals", "gi_frame",
 }
 
 # 允许使用的安全模块白名单（如果启用白名单模式）
@@ -79,12 +93,10 @@ def _check_ast(code: str) -> bool:
                     if node.func.value.id == "importlib" and node.func.attr in _FORBIDDEN_CALLS_ALIASED:
                         raise SecurityError(f"禁止调用: importlib.{node.func.attr}")
 
-        # 禁止 getattr 调用（防范动态属性访问，如 getattr(os, 'system')）
-        if isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name) and node.func.id == "getattr":
-                raise SecurityError("禁止调用 getattr 以防范动态属性访问")
-            if isinstance(node.func, ast.Attribute) and node.func.attr == "getattr":
-                raise SecurityError("禁止调用 getattr 以防范动态属性访问")
+        # 禁止经典逃逸链的 dunder 属性访问 (().__class__.__base__.__subclasses__())
+        if isinstance(node, ast.Attribute):
+            if node.attr in _FORBIDDEN_ATTRS:
+                raise SecurityError(f"禁止访问 dunder 属性: .{node.attr}")
 
     return True
 
@@ -95,13 +107,28 @@ def _execute_code_worker(code: str, timeout: int, result_queue: multiprocessing.
     stderr_buffer = io.StringIO()
     start_time = time.time()
 
+    # 子进程层面尽量限制资源(Linux/macOS 才有 resource 模块)
+    try:
+        import resource
+        # 内存上限 512MB,CPU 60s
+        resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
+        resource.setrlimit(resource.RLIMIT_CPU, (60, 60))
+    except (ImportError, ValueError, OSError):
+        pass  # Windows 无 resource 模块,只靠超时兜底
+
     try:
         # 重定向 stdout/stderr
         with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
-            # 创建一个受限的全局命名空间
+            # 创建一个受限的全局命名空间。
+            # 要 pop 的远不止 open/eval — 还有可被构造逃逸链的 type/object/__build_class__/getattr 等。
             import builtins
             safe_builtins = dict(builtins.__dict__)
-            for _fname in ("open", "input", "exec", "eval", "compile", "__import__"):
+            for _fname in (
+                "open", "input", "exec", "eval", "compile", "__import__",
+                "__build_class__", "globals", "locals", "vars",
+                "type", "object", "memoryview", "getattr", "setattr", "delattr",
+                "breakpoint", "help", "exit", "quit",
+            ):
                 safe_builtins.pop(_fname, None)
             safe_globals = {
                 "__builtins__": safe_builtins,

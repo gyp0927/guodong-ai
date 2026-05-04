@@ -1,4 +1,5 @@
 """HTTP API Blueprint - 从 web.app 拆分出来的路由。"""
+import ast
 import io
 import logging
 import os
@@ -6,6 +7,7 @@ import tempfile
 from pathlib import Path
 
 from flask import Blueprint, request, send_file, render_template
+from werkzeug.utils import secure_filename
 
 api_bp = Blueprint("api", __name__)
 logger = logging.getLogger(__name__)
@@ -13,6 +15,7 @@ logger = logging.getLogger(__name__)
 # 显式导入 web.app 中定义的共享符号（避免隐式依赖）
 # 注：这些符号在 app.py 模块初始化后可用，由于 Flask Blueprint 的延迟执行机制不会导致循环导入
 from web.app import _GENERATED_DIR, has_valid_config, init_agents
+from core.auth import auth_required
 
 # ===== HTTP Routes =====
 
@@ -37,6 +40,7 @@ def plugins_page():
 
 
 @api_bp.route("/api/upload", methods=["POST"])
+@auth_required
 def upload_file():
     """上传并解析文件，返回文件内容"""
     if "file" not in request.files:
@@ -46,8 +50,10 @@ def upload_file():
     if file.filename == "":
         return {"success": False, "message": "文件名为空"}, 400
 
-    temp_dir = tempfile.gettempdir()
-    file_path = os.path.join(temp_dir, file.filename)
+    # secure_filename 防 ../ 与绝对路径
+    safe_name = secure_filename(file.filename) or "upload.bin"
+    temp_dir = tempfile.mkdtemp(prefix="upload_")
+    file_path = os.path.join(temp_dir, safe_name)
     file.save(file_path)
 
     try:
@@ -64,8 +70,12 @@ def upload_file():
         logger.exception(f"Failed to parse file: {file.filename}")
         return {"success": False, "message": f"解析失败: {str(e)}"}, 500
     finally:
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            os.rmdir(temp_dir)
+        except OSError:
+            pass
 
 
 @api_bp.route("/api/generate-file", methods=["POST"])
@@ -425,7 +435,22 @@ def disable_plugin_api(name):
 
 # 插件上传安全限制
 _MAX_PLUGIN_SIZE = 256 * 1024  # 256KB
-_PLUGIN_FORBIDDEN_IMPORTS = {"os.system", "subprocess", "eval", "exec", "compile", "__import__"}
+_PLUGIN_FORBIDDEN_MODULES = {
+    "os", "sys", "subprocess", "ctypes", "socket", "importlib",
+    "urllib", "http", "ftplib", "smtplib", "pickle", "marshal",
+    "shutil", "pathlib", "tempfile", "multiprocessing",
+}
+_PLUGIN_FORBIDDEN_CALLS = {
+    "eval", "exec", "compile", "__import__", "open", "input",
+    "system", "popen", "call", "run", "spawn", "fork",
+    "getattr", "setattr", "delattr",
+    "import_module", "find_loader", "spec_from_file_location",
+}
+_PLUGIN_FORBIDDEN_ATTRS = {
+    "__class__", "__bases__", "__base__", "__subclasses__",
+    "__mro__", "__globals__", "__builtins__", "__import__",
+    "__getattribute__",
+}
 
 
 def _is_safe_plugin_filename(filename: str) -> bool:
@@ -438,16 +463,51 @@ def _is_safe_plugin_filename(filename: str) -> bool:
 
 
 def _scan_plugin_content(content: str) -> list[str]:
-    """扫描插件内容中的可疑代码。"""
-    issues = []
-    content_lower = content.lower()
-    for forbidden in _PLUGIN_FORBIDDEN_IMPORTS:
-        if forbidden in content_lower:
-            issues.append(f"发现危险操作: {forbidden}")
-    return issues
+    """AST 级扫描插件代码,挡 substring 黑名单挡不住的绕过手法。
+
+    挡的攻击向量:
+    - 危险模块 import / from import
+    - 危险调用名(eval/exec/getattr/system/...)
+    - 危险 dunder 属性访问(__class__/__subclasses__/__globals__ 链式)
+    - 字符串拼接 + getattr 间接调用(getattr 已直接禁)
+    """
+    issues: list[str] = []
+    try:
+        tree = ast.parse(content)
+    except SyntaxError as e:
+        issues.append(f"语法错误: {e}")
+        return issues
+
+    for node in ast.walk(tree):
+        # import xxx
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".")[0]
+                if top in _PLUGIN_FORBIDDEN_MODULES:
+                    issues.append(f"禁止 import: {alias.name}")
+        # from xxx import yyy
+        elif isinstance(node, ast.ImportFrom):
+            top = (node.module or "").split(".")[0]
+            if top in _PLUGIN_FORBIDDEN_MODULES:
+                issues.append(f"禁止 from-import: {node.module}")
+            for alias in node.names:
+                if alias.name in _PLUGIN_FORBIDDEN_CALLS:
+                    issues.append(f"禁止导入名: {alias.name}")
+        # 调用名
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in _PLUGIN_FORBIDDEN_CALLS:
+                issues.append(f"禁止调用: {node.func.id}")
+            elif isinstance(node.func, ast.Attribute) and node.func.attr in _PLUGIN_FORBIDDEN_CALLS:
+                issues.append(f"禁止调用: .{node.func.attr}()")
+        # 危险属性访问 (.__class__ / .__subclasses__ 等)
+        elif isinstance(node, ast.Attribute):
+            if node.attr in _PLUGIN_FORBIDDEN_ATTRS:
+                issues.append(f"禁止访问 dunder 属性: .{node.attr}")
+    return list(set(issues))
 
 
 @api_bp.route("/api/plugins/upload", methods=["POST"])
+@auth_required
 def upload_plugin_api():
     """上传安装新插件（带安全校验）"""
     try:

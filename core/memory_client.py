@@ -12,6 +12,10 @@ import logging
 import os
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
+EMBEDDER_WARMUP_TIMEOUT_S = 60.0
+
 # The memory system expects DOCUMENT_STORE_PATH but the Settings class only
 # defines MEMORY_STORE_PATH. We set a fallback env var before importing so
 # that Pydantic Settings picks it up.
@@ -21,6 +25,7 @@ if not os.environ.get("DOCUMENT_STORE_PATH"):
     )
 
 # Memory system imports (may fail if deps are missing – guarded in __init__)
+_import_err: Exception | None = None
 try:
     from hot_and_cold_memory.core.config import get_settings
     from hot_and_cold_memory.core.logging import setup_logging
@@ -38,11 +43,10 @@ try:
     from hot_and_cold_memory.tiers.hot_tier import HotTier
 
     _MEMORY_SYSTEM_AVAILABLE = True
-except Exception as _import_err:  # pragma: no cover
+except Exception as _e:  # pragma: no cover
     _MEMORY_SYSTEM_AVAILABLE = False
-    logger.debug(f"Memory system import failed: {_import_err}")
-
-logger = logging.getLogger(__name__)
+    _import_err = _e
+    logger.debug(f"Memory system import failed: {_e}")
 
 # ---------------------------------------------------------------------------
 # Singleton storage – one global store per process
@@ -174,6 +178,30 @@ class AgentMemoryStore:
 
             self._initialized = True
             logger.info("Agent memory store initialized successfully")
+
+            # 校验 embedder 维度与 Qdrant 集合配置一致;不一致时切模型(384↔1536)
+            # 后续 upsert 会静默写错维度,先 fail-fast 提醒。
+            settings = get_settings()
+            try:
+                actual = await embedder.embed("dim_check")
+                if len(actual) != settings.EMBEDDING_DIMENSION:
+                    logger.error(
+                        "Embedding dimension mismatch: model returns %d, "
+                        "EMBEDDING_DIMENSION=%d. 切模型后请清空 ./data/qdrant_storage 并重启。",
+                        len(actual), settings.EMBEDDING_DIMENSION,
+                    )
+            except Exception as e:
+                logger.warning(f"Dimension check skipped: {e}")
+
+            # sentence-transformers 首次 embed 调用会同步加载模型（10-20s 网络 + 解压），
+            # 不预热则首条用户消息必然超时。失败仅警告，retrieve 时再走 lazy load 兜底。
+            try:
+                await asyncio.wait_for(embedder.embed("warmup"), timeout=EMBEDDER_WARMUP_TIMEOUT_S)
+                logger.info("Embedder warmed up")
+            except asyncio.TimeoutError:
+                logger.warning(f"Embedder warmup timed out (>{EMBEDDER_WARMUP_TIMEOUT_S}s)")
+            except Exception as e:
+                logger.warning(f"Embedder warmup failed: {e}")
 
     def is_initialized(self) -> bool:
         return self._initialized
@@ -316,3 +344,37 @@ class AgentMemoryStore:
             "initialized": True,
             "vector_collection": get_settings().VECTOR_DB_COLLECTION,
         }
+
+    async def shutdown(self) -> None:
+        """关闭底层存储客户端。
+
+        Qdrant local 持有 file lock,SQLAlchemy engine 持有连接池;
+        进程退出时不主动关闭会触发 __del__ 里的 ImportError(Python 已开始关闭)。
+        """
+        if not self._initialized:
+            return
+
+        async with self._lock:
+            # Qdrant 的 close 是同步的
+            vs = self._services.get("vector_store")
+            client = getattr(vs, "client", None)
+            if client is not None:
+                try:
+                    close = getattr(client, "close", None)
+                    if callable(close):
+                        await asyncio.to_thread(close)
+                except Exception as e:
+                    logger.warning(f"Qdrant close failed: {e}")
+
+            # SQLAlchemy AsyncEngine 用 dispose
+            ms = self._services.get("metadata_store")
+            engine = getattr(ms, "engine", None)
+            if engine is not None:
+                try:
+                    await engine.dispose()
+                except Exception as e:
+                    logger.warning(f"Metadata store dispose failed: {e}")
+
+            self._services.clear()
+            self._initialized = False
+            logger.info("Agent memory store shut down")
