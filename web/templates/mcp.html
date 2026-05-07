@@ -18,28 +18,28 @@
   </script>
   <style>
     :root {
-      --cfg-bg: var(--main-bg, #212121);
-      --cfg-card: var(--input-bg, #2f2f2f);
-      --cfg-card-border: var(--input-border, #4d4d4f);
-      --cfg-text: var(--text-primary, #ececec);
-      --cfg-text2: var(--text-secondary, #b4b4b4);
-      --cfg-text3: var(--text-tertiary, #8e8e8e);
-      --cfg-accent: var(--accent, #10a37f);
-      --cfg-accent-h: var(--accent-hover, #0d8c6d);
+      --cfg-bg: #0a0a0f;
+      --cfg-card: #16161f;
+      --cfg-card-border: rgba(255,255,255,0.06);
+      --cfg-text: #e8e8f0;
+      --cfg-text2: #9ca3af;
+      --cfg-text3: #6b7280;
+      --cfg-accent: #00d4aa;
+      --cfg-accent-h: #00b894;
       --cfg-ok: #22c55e;
-      --cfg-err: var(--error, #ef4444);
+      --cfg-err: #ef4444;
       --cfg-radius: 14px;
       --cfg-radius-sm: 10px;
-      --cfg-shadow: 0 2px 12px rgba(0,0,0,0.25);
+      --cfg-shadow: 0 2px 12px rgba(0,0,0,0.4);
     }
 
     [data-theme="light"] {
+      --cfg-bg: #f5f7fa;
       --cfg-card: #ffffff;
-      --cfg-card-border: #e5e5e5;
-      --cfg-bg: #ffffff;
-      --cfg-text: #1a1a1a;
-      --cfg-text2: #666;
-      --cfg-text3: #999;
+      --cfg-card-border: rgba(0,0,0,0.06);
+      --cfg-text: #1f2937;
+      --cfg-text2: #6b7280;
+      --cfg-text3: #9ca3af;
       --cfg-shadow: 0 2px 12px rgba(0,0,0,0.08);
     }
 
@@ -58,8 +58,8 @@
       position: sticky;
       top: 0;
       z-index: 100;
-      background: rgba(33,33,33,0.85);
-      backdrop-filter: blur(12px);
+      background: rgba(10,10,15,0.85);
+      backdrop-filter: blur(16px);
       border-bottom: 1px solid var(--cfg-card-border);
       padding: 0 20px;
     }
