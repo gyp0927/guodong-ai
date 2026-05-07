@@ -88,6 +88,10 @@ def _build_llm_kwargs(sid: str = "") -> dict:
             "User-Agent": "claude-code/1.0",
             "X-Stainless-Lang": "python",
             "X-Stainless-Package-Version": "1.0.0",
+            "X-Stainless-Runtime": "python",
+            "X-Stainless-Runtime-Version": "3.13.0",
+            "X-Stainless-OS": "Windows",
+            "X-Stainless-Arch": "x64",
         }
     return kwargs
 
