@@ -15,9 +15,20 @@ logger = logging.getLogger(__name__)
 # 显式导入 web.app 中定义的共享符号（避免隐式依赖）
 # 注：这些符号在 app.py 模块初始化后可用，由于 Flask Blueprint 的延迟执行机制不会导致循环导入
 from web.app import _GENERATED_DIR, has_valid_config, init_agents
-from core.auth import auth_required
-from core.plugin_system import list_plugins
+from core.auth import (
+    auth_required, AUTH_ENABLED, create_user, authenticate,
+    get_user_by_id, list_users, delete_user, update_user_config,
+)
+from core.config import PROVIDER_NAMES, BASE_URLS
+from core.export import export_markdown, export_json, export_html, export_pdf, get_export_filename
+from core.plugin_system import list_plugins, get_registry, execute_plugin
 from core.model_router import get_router
+from agents.llm import clear_llm_cache
+from state.model_config_manager import (
+    list_configs, list_configs_full, get_active_config,
+    add_config, update_config, delete_config, set_active_config, sync_to_env,
+)
+from state.stats import record_call, estimate_cost, get_stats_summary, get_daily_stats, CallRecord
 
 # ===== HTTP Routes =====
 
