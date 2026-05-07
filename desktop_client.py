@@ -188,6 +188,17 @@ def main():
 
     print(f"[Client] Server ready at http://127.0.0.1:{port}")
 
+    # 清除 WebView2 缓存，确保前端更新生效
+    import shutil
+    webview_data_dir = os.path.join(os.getenv("LOCALAPPDATA", ""), "Karen", "WebView2")
+    if os.path.exists(webview_data_dir):
+        try:
+            shutil.rmtree(webview_data_dir)
+            print(f"[Client] Cleared WebView2 cache: {webview_data_dir}")
+        except Exception as e:
+            print(f"[Client] Warning: could not clear cache: {e}")
+    os.environ["WEBVIEW2_USER_DATA_FOLDER"] = webview_data_dir
+
     # 启动 WebView 窗口
     try:
         import webview
