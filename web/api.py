@@ -12,9 +12,6 @@ from werkzeug.utils import secure_filename
 api_bp = Blueprint("api", __name__)
 logger = logging.getLogger(__name__)
 
-# 显式导入 web.app 中定义的共享符号（避免隐式依赖）
-# 注：这些符号在 app.py 模块初始化后可用，由于 Flask Blueprint 的延迟执行机制不会导致循环导入
-from web.app import _GENERATED_DIR, has_valid_config, init_agents
 from core.auth import (
     auth_required, AUTH_ENABLED, create_user, authenticate,
     get_user_by_id, list_users, delete_user, update_user_config,
@@ -866,5 +863,9 @@ def delete_user_api(user_id):
     except Exception as e:
         logger.exception(f"Failed to delete user {user_id}")
         return {"success": False, "message": str(e)}, 500
+
+
+# 延迟导入 web.app 符号（避免循环导入导致 Blueprint 注册顺序错误）
+from web.app import _GENERATED_DIR, has_valid_config, init_agents  # noqa: E402
 
 
